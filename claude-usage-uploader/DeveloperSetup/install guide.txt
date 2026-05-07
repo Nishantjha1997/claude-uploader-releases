@@ -1,0 +1,439 @@
+================================================================================
+   CLAUDE USAGE UPLOADER — INSTALLATION GUIDE
+   Version 1.3.1 | Sigma Solve
+================================================================================
+
+This tool automatically reports your Claude AI usage to Sigma Solve admin.
+Once installed, it runs silently in the background — you will never see it
+or need to interact with it again.
+
+Before you begin, make sure you have received BOTH of these files from admin:
+
+   1. The binary for your operating system (see which one below)
+   2. service-account-key.json
+
+Both files must always stay in the same folder together.
+
+================================================================================
+   WHICH FILE DO I USE?
+================================================================================
+
+   Windows computer          -->  ClaudeUsageUploader.exe
+   Mac with M1/M2/M3/M4 chip -->  ClaudeUsageUploader-mac-arm64
+   Mac with Intel chip       -->  ClaudeUsageUploader-mac-x64
+   Linux computer            -->  ClaudeUsageUploader-linux
+
+   HOW TO CHECK WHICH MAC YOU HAVE:
+   Click the Apple logo (top-left corner of your screen) --> About This Mac
+   Look at the "Chip" or "Processor" line.
+   If it says "Apple M1" or "M2" or "M3" or "M4"  --> use mac-arm64
+   If it says "Intel"                              --> use mac-x64
+
+================================================================================
+   WINDOWS INSTALLATION
+================================================================================
+
+WHAT YOU NEED:
+   - ClaudeUsageUploader.exe
+   - service-account-key.json
+
+------------------------------------------------------------------------
+STEP 1 — Create a folder for the tool
+------------------------------------------------------------------------
+
+   1. Open File Explorer (the folder icon in your taskbar, or press
+      Windows key + E).
+
+   2. Click on "This PC" on the left side.
+
+   3. Double-click on your C: drive (Local Disk C:).
+
+   4. Right-click on an empty area --> New --> Folder
+
+   5. Name the folder:   ClaudeUploader
+      (It will be at C:\ClaudeUploader\)
+
+------------------------------------------------------------------------
+STEP 2 — Copy the files into the folder
+------------------------------------------------------------------------
+
+   1. Find the two files you received from admin:
+         ClaudeUsageUploader.exe
+         service-account-key.json
+
+   2. Copy BOTH files into C:\ClaudeUploader\
+
+      You should now have:
+         C:\ClaudeUploader\ClaudeUsageUploader.exe
+         C:\ClaudeUploader\service-account-key.json
+
+------------------------------------------------------------------------
+STEP 3 — Run the installer (as Administrator)
+------------------------------------------------------------------------
+
+   This step needs Administrator permission. You only do this ONCE.
+
+   1. Open File Explorer and navigate to C:\ClaudeUploader\
+
+   2. Find ClaudeUsageUploader.exe
+
+   3. RIGHT-CLICK on ClaudeUsageUploader.exe
+      (important: right-click, not double-click)
+
+   4. In the menu that appears, click "Run as administrator"
+
+   5. A popup may appear asking "Do you want to allow this app to make
+      changes to your device?" — Click YES.
+
+   6. Your web browser will automatically open a setup page.
+      If it doesn't open within 10 seconds, open your browser manually
+      and go to:   http://localhost:3000
+
+------------------------------------------------------------------------
+STEP 4 — Complete the setup form in your browser
+------------------------------------------------------------------------
+
+   You will see a setup page with a form.
+
+   1. Type your FIRST NAME in the "First Name" box.
+      (Use the same name your admin registered you with — if unsure, ask.)
+
+   2. Type your LAST NAME in the "Last Name" box.
+
+   3. Click the "Complete Setup" button.
+
+   4. Wait for the page to show a success message.
+
+   5. Close the browser tab.
+
+------------------------------------------------------------------------
+STEP 5 — You are done!
+------------------------------------------------------------------------
+
+   The tool is now running completely hidden in the background.
+   There is no icon, no window, nothing to see — that is normal.
+
+   It will automatically start again every time you log in or
+   restart your computer. You never need to open it again.
+
+   HOW TO CHECK IT IS WORKING:
+   1. Open Command Prompt (press Windows key, type "cmd", press Enter)
+   2. Type this command and press Enter:
+      tasklist /v /fi "imagename eq ClaudeUsageUploader.exe"
+   3. You should see it listed. That means it is running correctly.
+
+================================================================================
+   MAC INSTALLATION
+================================================================================
+
+WHAT YOU NEED:
+   - ClaudeUsageUploader-mac-arm64   (for M1/M2/M3/M4 chip Macs)
+     OR
+     ClaudeUsageUploader-mac-x64     (for Intel chip Macs)
+   - service-account-key.json
+
+   Not sure which Mac you have? See "WHICH FILE DO I USE?" at the top.
+
+------------------------------------------------------------------------
+STEP 1 — Open Terminal
+------------------------------------------------------------------------
+
+   Terminal is a program that lets you type commands to your Mac.
+   Don't worry — we will tell you exactly what to type.
+
+   TO OPEN TERMINAL:
+   1. Press Command + Spacebar on your keyboard.
+   2. Type the word:   Terminal
+   3. Press Enter.
+   4. A window opens with a black or white background and a cursor.
+      That is Terminal. Leave it open.
+
+------------------------------------------------------------------------
+STEP 2 — Create a folder for the tool
+------------------------------------------------------------------------
+
+   In Terminal, type this command exactly and press Enter:
+
+      mkdir ~/ClaudeUploader
+
+   Nothing visible will happen — that is normal. The folder was created.
+
+------------------------------------------------------------------------
+STEP 3 — Copy the files into the folder
+------------------------------------------------------------------------
+
+   1. Find the files you received from admin on your Mac
+      (probably in your Downloads folder).
+
+   2. Open Finder (the blue smiley face icon in your dock).
+
+   3. Press Command + Shift + H to go to your Home folder.
+
+   4. You should see a folder called "ClaudeUploader" that was just created.
+
+   5. Open that folder.
+
+   6. Drag and drop BOTH files into it:
+         ClaudeUsageUploader-mac-arm64  (or mac-x64 for Intel)
+         service-account-key.json
+
+------------------------------------------------------------------------
+STEP 4 — Give the tool permission to run (Apple Silicon / M1/M2/M3/M4)
+------------------------------------------------------------------------
+
+   SKIP THIS STEP IF YOU HAVE AN INTEL MAC. Go to Step 5.
+
+   For M1/M2/M3/M4 Macs, type these two commands in Terminal.
+   Press Enter after each one:
+
+   Command 1:
+      chmod +x ~/ClaudeUploader/ClaudeUsageUploader-mac-arm64
+
+   Command 2:
+      codesign --sign - ~/ClaudeUploader/ClaudeUsageUploader-mac-arm64
+
+   Wait for each command to finish before typing the next one.
+   No output or a blank line means it worked — that is normal.
+
+------------------------------------------------------------------------
+STEP 4B — Give the tool permission to run (Intel Mac only)
+------------------------------------------------------------------------
+
+   SKIP THIS STEP IF YOU HAVE AN M1/M2/M3/M4 MAC. You already did Step 4.
+
+   In Terminal, type this command and press Enter:
+
+      chmod +x ~/ClaudeUploader/ClaudeUsageUploader-mac-x64
+
+------------------------------------------------------------------------
+STEP 5 — Run the tool to complete setup
+------------------------------------------------------------------------
+
+   In Terminal, type ONE of these commands depending on your Mac type,
+   then press Enter:
+
+   If you have M1/M2/M3/M4 (Apple Silicon):
+      ~/ClaudeUploader/ClaudeUsageUploader-mac-arm64
+
+   If you have Intel:
+      ~/ClaudeUploader/ClaudeUsageUploader-mac-x64
+
+   Your web browser will automatically open a setup page.
+   If it doesn't open within 10 seconds, open your browser manually
+   and type in the address bar:   http://localhost:3000
+
+------------------------------------------------------------------------
+   POSSIBLE WARNING: "Cannot be opened because the developer cannot
+   be verified" or "App is damaged"
+------------------------------------------------------------------------
+
+   If macOS shows you this warning, do the following:
+
+   1. Click "Cancel" (do NOT click "Move to Trash").
+
+   2. Go to: Apple menu --> System Settings --> Privacy & Security
+
+   3. Scroll down until you see a message about ClaudeUsageUploader
+      being blocked.
+
+   4. Click "Allow Anyway".
+
+   5. Go back to Terminal and run the same command again (Step 5).
+
+   6. A new popup will appear — click "Open" to confirm.
+
+------------------------------------------------------------------------
+STEP 6 — Complete the setup form in your browser
+------------------------------------------------------------------------
+
+   You will see a setup page with a form.
+
+   1. Type your FIRST NAME in the "First Name" box.
+      (Use the same name your admin registered you with — if unsure, ask.)
+
+   2. Type your LAST NAME in the "Last Name" box.
+
+   3. Click the "Complete Setup" button.
+
+   4. Wait for the page to show a success message.
+
+   5. Close the browser tab.
+
+------------------------------------------------------------------------
+STEP 7 — You are done!
+------------------------------------------------------------------------
+
+   The tool is now running in the background.
+   It will automatically start again every time you log in to your Mac.
+   You never need to open Terminal or run any command again.
+
+   HOW TO CHECK IT IS WORKING:
+   1. Open Terminal.
+   2. Type this and press Enter:
+      launchctl list | grep claudeuploader
+   3. If you see a line with numbers appear, it is running correctly.
+
+================================================================================
+   LINUX INSTALLATION
+================================================================================
+
+WHAT YOU NEED:
+   - ClaudeUsageUploader-linux
+   - service-account-key.json
+
+------------------------------------------------------------------------
+STEP 1 — Open a Terminal
+------------------------------------------------------------------------
+
+   Terminal is where you type commands. Here is how to open it:
+
+   Ubuntu / Linux Mint:
+      Press Ctrl + Alt + T on your keyboard.
+      OR right-click on the desktop --> Open Terminal.
+
+   Fedora / CentOS / RHEL:
+      Press the Activities button (top left) --> search "Terminal".
+
+   Any Linux:
+      Look in your Applications menu for "Terminal" or "Konsole"
+      or "xterm".
+
+   A window opens with text and a cursor. Leave it open.
+
+------------------------------------------------------------------------
+STEP 2 — Create a folder for the tool
+------------------------------------------------------------------------
+
+   In Terminal, type this command exactly and press Enter:
+
+      mkdir ~/ClaudeUploader
+
+   Nothing visible will happen — that is normal. The folder was created.
+
+------------------------------------------------------------------------
+STEP 3 — Copy the files into the folder
+------------------------------------------------------------------------
+
+   You need to copy BOTH files you received from admin into
+   the ClaudeUploader folder.
+
+   If the files are in your Downloads folder, type these commands
+   in Terminal and press Enter after each one:
+
+      cp ~/Downloads/ClaudeUsageUploader-linux ~/ClaudeUploader/
+      cp ~/Downloads/service-account-key.json ~/ClaudeUploader/
+
+   If the files are somewhere else, you can also use your file manager
+   (Files app) to drag and drop both files into the ClaudeUploader folder
+   in your Home directory.
+
+------------------------------------------------------------------------
+STEP 4 — Give the tool permission to run
+------------------------------------------------------------------------
+
+   In Terminal, type this command exactly and press Enter:
+
+      chmod +x ~/ClaudeUploader/ClaudeUsageUploader-linux
+
+   Nothing visible will happen — that is normal.
+
+------------------------------------------------------------------------
+STEP 5 — Run the tool to complete setup
+------------------------------------------------------------------------
+
+   In Terminal, type this command and press Enter:
+
+      ~/ClaudeUploader/ClaudeUsageUploader-linux
+
+   Your web browser should open automatically to a setup page.
+
+   *** IMPORTANT — IF YOU ARE ON A REMOTE/HEADLESS SERVER ***
+   If you are connected to a server via SSH and there is no web browser,
+   you need to do this on your LOCAL computer instead:
+
+      1. Open a NEW Terminal window on YOUR computer (not the server).
+      2. Type this command (replace "youruser" and "yourserver" with
+         your actual SSH username and server address):
+            ssh -L 3000:localhost:3000 youruser@yourserver
+      3. Then open your browser on your local computer and go to:
+            http://localhost:3000
+
+------------------------------------------------------------------------
+STEP 6 — Complete the setup form in your browser
+------------------------------------------------------------------------
+
+   You will see a setup page with a form.
+
+   1. Type your FIRST NAME in the "First Name" box.
+      (Use the same name your admin registered you with — if unsure, ask.)
+
+   2. Type your LAST NAME in the "Last Name" box.
+
+   3. Click the "Complete Setup" button.
+
+   4. Wait for the page to show a success message.
+
+   5. Close the browser tab.
+
+------------------------------------------------------------------------
+STEP 7 — You are done!
+------------------------------------------------------------------------
+
+   The tool is now running in the background.
+   It has added itself to your system so it starts automatically
+   every time your computer restarts.
+   You never need to open Terminal again.
+
+   HOW TO CHECK IT IS WORKING:
+   1. Open Terminal.
+   2. Type this and press Enter:
+      pgrep -a ClaudeUsageUploader
+   3. If a line of text with numbers appears, it is running correctly.
+   4. If nothing appears, run the tool again (Step 5) to restart it.
+
+================================================================================
+   COMMON QUESTIONS
+================================================================================
+
+Q: The browser did not open automatically. What do I do?
+A: Open your browser (Chrome, Firefox, Safari, Edge) manually and type
+   this in the address bar:   http://localhost:3000
+   Then press Enter. The setup page should appear.
+
+Q: How do I know if it is actually working?
+A: Your name will appear as "Online" in the admin dashboard within
+   about 30 seconds of completing setup. Ask your admin to confirm.
+
+Q: I see an error about "ccusage not found". What does that mean?
+A: The tool needs ccusage to be installed. Open Terminal and type:
+      npm install -g ccusage
+   If you get an error about npm not being found, you need to install
+   Node.js first. Go to https://nodejs.org and download the LTS version.
+
+Q: I entered the wrong name during setup. How do I fix it?
+A: Delete the config file and run the binary again.
+   Windows:   Delete the folder at:
+              C:\Users\YOURNAME\AppData\Roaming\ClaudeUsageUploader\
+   Mac/Linux: Open Terminal and type:
+              rm -rf ~/.config/ClaudeUsageUploader/
+   Then run the setup again from Step 3/5.
+
+Q: Can I move the folder after setup?
+A: No. Keep the files in the same location you chose during setup.
+   Moving the folder will break the automatic startup. If you must
+   move it, delete the config file and redo setup from the new location.
+
+Q: Do I need to keep Terminal open for the tool to keep running?
+A: No. After setup is complete, you can close Terminal. The tool
+   runs in the background even when Terminal is closed.
+
+================================================================================
+   NEED HELP?
+================================================================================
+
+   If you are stuck on any step, contact your admin and mention:
+   - Which step you are on
+   - What your operating system is (Windows / Mac / Linux)
+   - What message or error you see on screen
+
+================================================================================

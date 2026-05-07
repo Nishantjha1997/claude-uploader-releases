@@ -1,0 +1,38 @@
+# Google credentials — NEVER commit this
+service-account-key.json
+DeveloperSetup/service-account-key.json
+
+# Node dependencies — reinstall with npm install
+node_modules/
+DeveloperSetup/node_modules/
+
+# Build temp files
+*.tmp
+logo_b64.txt
+fix-logo.js
+fix-logo.py
+copy-binaries.py
+copy-exe.py
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Claude Code session files
+.claude/
+
+# Internal planning / AI-generated notes
+context.md
+planning.md
+project_brain_map.md
+claude-code-fix-plan.md
+AAINSTALLATION GUIDE.txt
+generate-manifest.js
+*.exe
+
+*ClaudeUsageUploader-*
+

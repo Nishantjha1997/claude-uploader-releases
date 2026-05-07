@@ -1,0 +1,6 @@
+{
+  "latestVersion": "1.4.0",
+  "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v1.4.0/ClaudeUsageUploader.exe",
+  "checksum": "c226405433bef227360611cd0171b36e3fcd25535468e136e8cd2c8dea4226ca",
+  "releaseNotes": "v1.4.0 - Compliance dashboard audit: admin access controls, batch polling, log rotation, search filter, compliance rate metric, UX polish"
+}

@@ -1,0 +1,691 @@
+<script>
+let dashboardData = {};
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  var d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+let expandState = {};
+let countdownInterval;
+let refreshTimer;
+let refreshCountdown = 30;
+let progressInterval = null;
+
+function isPaused() {
+  if (document.hidden) return true;
+  if (document.getElementById('logsModal') && document.getElementById('logsModal').classList.contains('open')) return true;
+  if (document.getElementById('confirmOverlay') && document.getElementById('confirmOverlay').classList.contains('open')) return true;
+  return false;
+}
+
+function showToast(msg, isErr=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `show ${isErr?'err':'ok'}`;
+  setTimeout(()=>t.className='', 3000);
+}
+
+function timeSince(date) {
+  if (!date) return 'Never';
+  const s = Math.floor((new Date() - new Date(date))/1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s/60); if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m/60); if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h/24)}d ago`;
+}
+
+function getBadgeHtml(status) {
+  const s = String(status).toUpperCase().trim();
+  if (['SUCCESS', 'REPORTED', 'COMPLIANT'].includes(s)) return '<span class="badge b-green">Reported</span>';
+  if (['FAILURE', 'ERROR'].includes(s)) return '<span class="badge b-red">Failed</span>';
+  if (s === 'PENDING') return '<span class="badge b-amber">Pending</span>';
+  return `<span class="badge b-grey">${esc(status)}</span>`;
+}
+
+function getStatusDotHtml(user) {
+  if (user.paused) return '<span class="status-dot dot-offline" style="background:var(--amber)" title="User is paused"></span> Paused';
+  if (user.pendingTrigger) return '<span class="status-dot dot-waiting" title="Trigger queued"></span>';
+  const lb = user.lastHeartbeat ? new Date(user.lastHeartbeat) : 0;
+  const ls = user.lastSeen ? new Date(user.lastSeen) : 0;
+  const lp = user.lastPong ? new Date(user.lastPong) : 0;
+  const recent = new Date(Math.max(lb, ls, lp));
+  if (!recent.getTime()) return '<span class="status-dot dot-offline" title="Never seen"></span> Offline';
+  const minAgo = (new Date() - recent) / 60000;
+  if (minAgo < 10) return '<span class="status-dot dot-online" title="Online (<10m ago)"></span> Online';
+  if (minAgo < 60) return '<span class="status-dot dot-away" title="Away (10m-1h ago)"></span> Away';
+  return '<span class="status-dot dot-offline" title="Offline (>1h ago)"></span> Offline';
+}
+
+function fetchData() {
+  var rb = document.getElementById('refreshBtn');
+  rb.disabled = true; rb.classList.add('loading'); rb.innerHTML = '&#8635; Loading...';
+  google.script.run.withSuccessHandler(function(res) {
+    try {
+      dashboardData = res;
+      renderDashboard();
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('dashboard').style.display = 'block';
+      
+      var now = new Date();
+      var ts = now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
+      document.getElementById('lastUpdated').textContent = 'Updated ' + ts;
+      
+      rb.disabled = false; rb.classList.remove('loading'); rb.innerHTML = '&#8635; Refresh';
+      resetAutoRefresh();
+    } catch(e) {
+      showToast('Render error: ' + e.message, true);
+      document.getElementById('loading').style.display = 'none';
+      rb.disabled = false; rb.classList.remove('loading'); rb.innerHTML = '&#8635; Refresh';
+    }
+  }).withFailureHandler(function(err) {
+    showToast('Failed to load data: ' + err.message, true);
+    rb.disabled = false; rb.classList.remove('loading'); rb.innerHTML = '&#8635; Refresh';
+  }).getDashboardData();
+}
+
+function renderDashboard() {
+  Object.values(countdownTimers).forEach(t => clearInterval(t));
+  countdownTimers = {};
+  
+  const { expectedDevelopers=[], registeredDevelopers=[], weeks=[], complianceByWeek={}, activeUsers=[], triggerQueue=[] } = dashboardData;
+  const registeredNames = registeredDevelopers.map(r => r.name);
+  const expectedCount = expectedDevelopers.length;
+  const registeredCount = registeredNames.length;
+  const registeredList = registeredNames;
+  const unregisteredList = expectedDevelopers.filter(n => !registeredNames.includes(n));
+  const adminTriggers = triggerQueue.map(t => ({ devName: t.name, timestamp: t.queuedAt, user: t.queuedBy, type: t.type }));
+  const adminUsers = expectedDevelopers;
+
+  // Active Users
+  const tb = document.getElementById('activeUsersTbody');
+  tb.innerHTML = '';
+  if (activeUsers.length === 0) {
+    document.getElementById('activeUsersTable').style.display = 'none';
+    document.getElementById('activeUsersEmpty').style.display = 'block';
+  } else {
+    document.getElementById('activeUsersTable').style.display = 'table';
+    document.getElementById('activeUsersEmpty').style.display = 'none';
+    activeUsers.forEach(u => {
+      const isExp = expandState[u.name];
+      const tr = document.createElement('tr');
+      tr.className = 'clickable-row';
+      tr.innerHTML = `
+        <td style="font-weight:600">${esc(u.name)}</td>
+        <td><div class="status-cell">${getStatusDotHtml(u)}</div></td>
+        <td><div style="font-size:11px">${timeSince(u.lastSeen)}</div></td>
+        <td><div style="font-size:11px">${timeSince(u.lastPong)}</div></td>
+        <td><div style="font-size:11px">${timeSince(u.lastUpload)}</div></td>
+        <td>
+          <div class="action-cell">
+            <button class="btn btn-primary btn-sm ${u.pendingTrigger?'btn-queued':''} js-force-run" data-name="${esc(u.name)}" ${u.pendingTrigger?'disabled':''}>
+              ${u.pendingTrigger ? '&#9203; Queued' : '&#9654; Generate'}
+            </button>
+            <button class="btn btn-cyan btn-sm ${u.pendingPing?'btn-pinged':''} js-ping" data-name="${esc(u.name)}" ${u.pendingPing?'disabled':''}>
+              &#128225; Ping
+            </button>
+            <button class="btn ${u.paused ? 'btn-green' : 'btn-amber'} btn-sm js-toggle-pause" data-name="${esc(u.name)}" data-paused="${u.paused}">
+              ${u.paused ? '&#9654; Resume' : '&#9208; Pause'}
+            </button>
+            <button class="btn btn-ghost btn-sm js-show-logs" data-name="${esc(u.name)}">Logs</button>
+          </div>
+        </td>
+      `;
+      tr.onclick = () => toggleRow(u.name);
+      tb.appendChild(tr);
+      
+      const trExt = document.createElement('tr');
+      trExt.className = 'prog-row';
+      trExt.innerHTML = `<td colspan="6"><div id="prog_${u.name}" class="prog-inner ${isExp?'open':''}"><div class="loader-wrap"><div class="loader-ring"></div></div></div></td>`;
+      tb.appendChild(trExt);
+    });
+
+    // Batch fetch any expanded progress rows
+    const expandedNames = activeUsers.filter(u => expandState[u.name]).map(u => u.name);
+    if (expandedNames.length > 0) fetchProgressBatch(expandedNames);
+  }
+
+  // Registration
+  document.getElementById('totalRegistered').textContent = registeredCount;
+  document.getElementById('totalPending').textContent = unregisteredList.length;
+  document.getElementById('registeredList').innerHTML = registeredList.map(n => `<li><span class="dev-name">${esc(n)}</span><span class="dev-date">&#10003;</span></li>`).join('');
+  document.getElementById('unregisteredList').innerHTML = unregisteredList.map(n => `<li><span class="dev-name unreg">${esc(n)}</span><span class="dev-date">&#9888;</span></li>`).join('');
+  
+  // Upload Summary
+  const tbSum = document.getElementById('uploadSummaryBody');
+  if (tbSum) {
+    tbSum.innerHTML = '';
+    // Use server-authoritative current week to avoid timezone mismatch
+    const currWeek = dashboardData.currentWeek || '';
+
+    const currentWeekData = complianceByWeek[currWeek] || { details: [] };
+    const currentWeekDetails = currentWeekData.details || [];
+
+    adminUsers.forEach(uName => {
+      const activeU = dashboardData.activeUsers.find(x => x.name === uName);
+      const wkDet = currentWeekDetails.find(x => x.name === uName);
+      
+      let thisWeekStatus = '<span class="badge b-gray">Pending</span>';
+      if (wkDet && wkDet.status === 'SUCCESS') thisWeekStatus = '<span class="badge b-green">Success</span>';
+      else if (wkDet && wkDet.status === 'FAILURE') thisWeekStatus = '<span class="badge b-red">Failed</span>';
+
+      const lastUp = activeU && activeU.lastUpload ? new Date(activeU.lastUpload).toLocaleString() : 'Never';
+      let nextUp = 'Pending this week';
+      if (activeU && activeU.lastSuccessNextPoll) {
+        nextUp = new Date(activeU.lastSuccessNextPoll).toLocaleString();
+      }
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="font-weight:500">${esc(uName)}</td>
+        <td>${thisWeekStatus}</td>
+        <td><div style="font-size:12px;color:var(--t2)">${lastUp}</div></td>
+        <td><div style="font-size:12px;color:var(--t3)">${nextUp}</div></td>
+      `;
+      tbSum.appendChild(tr);
+    });
+  }
+
+  // Admin Queue
+  const qb = document.querySelector('#triggerQueueTable tbody');
+  qb.innerHTML = '';
+  if (adminTriggers.length === 0) {
+    document.getElementById('triggerQueueTable').style.display = 'none';
+    document.getElementById('triggerQueueEmpty').style.display = 'block';
+  } else {
+    document.getElementById('triggerQueueTable').style.display = 'table';
+    document.getElementById('triggerQueueEmpty').style.display = 'none';
+    adminTriggers.forEach((t) => {
+      qb.innerHTML += `<tr><td>${esc(t.devName)}</td><td>${new Date(t.timestamp).toLocaleString()}</td><td>${esc(t.user)}</td><td><span class="badge b-indigo">${esc(t.type)}</span></td>
+      <td><button class="btn btn-ghost btn-sm js-cancel-trigger" data-name="${esc(t.devName)}">Cancel</button></td></tr>`;
+    });
+  }
+
+  // Admin Select
+  const sel = document.getElementById('adminNameSelect');
+  const curSel = sel.value;
+  sel.innerHTML = '<option value="">— select developer —</option>' + adminUsers.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  if (curSel) sel.value = curSel;
+
+  // Compliance Week Selector
+  const ws = document.getElementById('weekSelector');
+  if (ws.options.length !== weeks.length) {
+    ws.innerHTML = weeks.map(w => `<option value="${esc(w)}">${esc(w)}</option>`).join('');
+  }
+  renderComplianceGrid();
+  loadExpectedDevelopers();
+}
+
+function renderComplianceGrid() {
+  const ws = document.getElementById('weekSelector');
+  if (!ws.value || !dashboardData.complianceByWeek) return;
+  const wk = ws.value;
+  const stats = dashboardData.complianceByWeek[wk] || { expected:0, reported:0, failed:0, pending:0, details:[] };
+  
+  document.getElementById('compExpected').textContent = stats.expected;
+  document.getElementById('compReported').textContent = stats.reported;
+  document.getElementById('compFailed').textContent = stats.failed;
+  document.getElementById('compPending').textContent = stats.pending;
+  
+  var rate = stats.expected > 0 ? Math.round((stats.reported / stats.expected) * 100) : 0;
+  document.getElementById('compRate').textContent = rate + '%';
+  
+  document.querySelector('#complianceTable tbody').innerHTML = stats.details.map(d => `
+    <tr>
+      <td style="font-weight:500">${esc(d.name)}</td>
+      <td>${getBadgeHtml(d.status)}</td>
+      <td><span style="font-size:11px;color:var(--t3)">${timeSince(d.lastSeen)}</span></td>
+    </tr>
+  `).join('');
+}
+
+// Progress
+function toggleRow(name) {
+  expandState[name] = !expandState[name];
+  const el = document.getElementById('prog_' + name);
+  if (expandState[name]) {
+    el.classList.add('open');
+    el.innerHTML = '<div class="loader-wrap"><div class="loader-ring"></div></div>';
+    fetchProgress(name);
+  } else {
+    el.classList.remove('open');
+  }
+}
+
+let countdownTimers = {};
+
+function startCountdown(name, nextPollAtStr) {
+  if (countdownTimers[name]) clearInterval(countdownTimers[name]);
+  const el = document.getElementById(`cd_${name}`);
+  if (!el || !nextPollAtStr) return;
+  
+  const target = new Date(nextPollAtStr).getTime();
+  
+  countdownTimers[name] = setInterval(() => {
+    const now = new Date().getTime();
+    const diff = Math.max(0, target - now);
+    const sec = (diff / 1000).toFixed(1);
+    
+    if (diff <= 0) {
+      el.textContent = 'Polling now...';
+    } else {
+      el.textContent = `Next poll in ${sec}s`;
+    }
+  }, 100);
+}
+
+function fetchProgressBatch(names) {
+  google.script.run
+    .withSuccessHandler(resMap => {
+      names.forEach(name => {
+        if (expandState[name] && resMap[name]) {
+          renderProgressHtml(name, resMap[name]);
+        }
+      });
+    })
+    .withFailureHandler(err => showToast('Progress error: ' + err.message, true))
+    .getDeveloperProgressStatusBatch(names);
+}
+
+function fetchProgress(name) {
+  if (!expandState[name]) return;
+  fetchProgressBatch([name]);
+}
+
+function renderProgressHtml(name, res) {
+  const { hasTrigger, recentLogs, lastNextPollAt } = res;
+  const logs = recentLogs || [];
+  let state = { ack: false, gen: false, genDone: false, up: false, upDone: false, err: false };
+  
+  // Scan backwards through recent logs
+  for (let i = 0; i < logs.length; i++) {
+    const s = String(logs[i].status).trim().toUpperCase();
+    if (s === 'SUCCESS' || s === 'FAILURE' || s === 'ERROR') {
+      if (i === 0 && !hasTrigger) { // Terminal state
+         if (s !== 'SUCCESS') state.err = true;
+         state.ack=true; state.gen=true; state.genDone=true; state.up=true; state.upDone=true;
+      }
+      break; 
+    }
+    if (s === 'POLLING_ACK') state.ack = true;
+    if (s === 'GENERATE_START') { state.ack = true; state.gen = true; }
+    if (s === 'GENERATE_DONE') { state.ack = true; state.gen = true; state.genDone = true; }
+    if (s === 'UPLOAD_START') { state.ack = true; state.gen = true; state.genDone = true; state.up = true; }
+  }
+  
+  const isDone = state.upDone && !hasTrigger;
+  
+  let html = `
+    <div class="prog-steps">
+      <!-- 1. Polling -->
+      <div class="prog-step">
+        <div class="prog-icon ${hasTrigger && !state.ack ? 'spinning' : state.ack ? 'active' : ''}">&#8987;</div>
+      </div>
+      <div class="prog-connector"><div class="prog-fill ${state.gen ? 'done' : ''}"></div></div>
+      
+      <!-- 2. Generating -->
+      <div class="prog-step">
+        <div class="prog-icon ${state.gen && !state.genDone ? 'spinning' : state.genDone ? 'active' : ''}">&#9881;</div>
+      </div>
+      <div class="prog-connector"><div class="prog-fill ${state.up ? 'done' : ''}"></div></div>
+      
+      <!-- 3. Uploading -->
+      <div class="prog-step">
+        <div class="prog-icon ${state.up && !state.upDone ? 'spinning' : state.upDone ? 'active' : ''}">&#9729;</div>
+      </div>
+      <div class="prog-connector"><div class="prog-fill ${isDone ? 'done' : ''}"></div></div>
+      
+      <!-- 4. Complete -->
+      <div class="prog-step">
+        <div class="prog-icon ${state.err ? 'error' : isDone ? 'done' : ''}">${state.err ? '&#10006;' : '&#10003;'}</div>
+      </div>
+    </div>
+    
+    <div class="prog-labels">
+      <div class="prog-lbl ${hasTrigger ? 'active' : state.ack ? 'done' : ''}">POLLING</div>
+      <div class="prog-lbl ${state.gen && !state.genDone ? 'active' : state.genDone ? 'done' : ''}">GENERATING</div>
+      <div class="prog-lbl ${state.up && !state.upDone ? 'active' : state.upDone ? 'done' : ''}">UPLOADING</div>
+      <div class="prog-lbl ${state.err ? 'error' : isDone ? 'done' : ''}">${state.err ? 'ERROR' : 'COMPLETE'}</div>
+    </div>
+  `;
+  
+  let subMsg = '';
+  if (state.err) subMsg = `<div class="prog-msg" style="color:var(--red)">Pipeline failed. Check logs for details.</div>`;
+  else if (isDone) subMsg = `<div class="prog-msg" style="color:var(--green)">Upload successful.</div>`;
+  else if (hasTrigger && !state.ack) subMsg = `<div class="prog-msg">Waiting for client to pick up trigger...</div>`;
+  else if (state.ack && !state.genDone) subMsg = `<div class="prog-msg">Client acknowledged, generating report...</div>`;
+  
+  let cdHtml = '';
+  if (!isDone && lastNextPollAt) {
+    cdHtml = `<div class="prog-countdown" id="cd_${name}">Next poll sync...</div>`;
+  }
+  
+  document.getElementById('prog_' + name).innerHTML = html + subMsg + cdHtml;
+  if (cdHtml) startCountdown(name, lastNextPollAt);
+}
+
+// Manage Developers
+function loadExpectedDevelopers() {
+  google.script.run
+    .withSuccessHandler(res => {
+      document.getElementById('managedDevList').innerHTML = res.map(n => `
+        <div class="dev-chip">
+          <span style="font-weight:500">${esc(n)}</span>
+          <button class="dev-chip-rm js-remove-dev" data-name="${esc(n)}" title="Remove">&#10005;</button>
+        </div>
+      `).join('');
+    })
+    .withFailureHandler(err => showToast('Error: ' + err.message, true))
+    .getExpectedDevelopersList();
+}
+
+function addDeveloper() {
+  const inp = document.getElementById('newDevName');
+  const val = inp.value.trim();
+  if (!val) return;
+  inp.disabled = true;
+  google.script.run
+    .withSuccessHandler(res => {
+      inp.disabled = false;
+      inp.value = '';
+      if (res.success) {
+        showToast('Developer added');
+        loadExpectedDevelopers();
+      } else showToast('Error: ' + res.error, true);
+    })
+    .withFailureHandler(err => {
+      inp.disabled = false;
+      showToast('Failed: ' + err.message, true);
+    })
+    .addExpectedDeveloper(val);
+}
+
+let devToDelete = null;
+function confirmDeleteDev(name) {
+  devToDelete = name;
+  document.getElementById('confirmMsg').textContent = `Are you sure you want to remove ${name} from the expected list?`;
+  document.getElementById('confirmOverlay').classList.add('open');
+}
+
+function closeConfirm() {
+  document.getElementById('confirmOverlay').classList.remove('open');
+  devToDelete = null;
+}
+
+document.getElementById('confirmOkBtn').addEventListener('click', () => {
+  if (!devToDelete) return;
+  const name = devToDelete;
+  closeConfirm();
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        showToast('Developer removed');
+        loadExpectedDevelopers();
+      } else showToast('Error: ' + res.error, true);
+    })
+    .withFailureHandler(err => showToast('Failed: ' + err.message, true))
+    .removeExpectedDeveloper(name);
+});
+
+
+// Triggers
+function queueForceRun() {
+  const sel = document.getElementById('adminNameSelect');
+  const btn = document.getElementById('adminRunBtn');
+  const res = document.getElementById('adminRunResult');
+  const name = sel.value;
+  if (!name) return showToast('Select a developer first', true);
+  
+  btn.disabled = true; btn.textContent = 'Queueing...'; res.textContent = '';
+  google.script.run
+    .withSuccessHandler(r => {
+      btn.disabled = false; btn.textContent = 'Queue Force Run';
+      if (r.success) { showToast('Force run queued for ' + name); fetchData(); }
+      else showToast('Error: ' + (r.error || 'Unknown error'), true);
+    })
+    .withFailureHandler(err => {
+      btn.disabled = false; btn.textContent = 'Queue Force Run';
+      showToast('Failed: ' + err.message, true);
+    })
+    .adminQueueTrigger(name, 'FORCE_RUN');
+}
+
+function queueForceRunUser(name) {
+  if (!name) { showToast('No developer name', true); return; }
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.success) { showToast('Force run queued for ' + name); fetchData(); }
+      else showToast('Error: ' + (r.error || 'Unknown error'), true);
+    })
+    .withFailureHandler(err => showToast('Failed: ' + err.message, true))
+    .adminQueueTrigger(name, 'FORCE_RUN');
+}
+
+function queuePingUser(name) {
+  if (!name) { showToast('No developer name', true); return; }
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.success) { showToast('Ping queued for ' + name); fetchData(); }
+      else showToast('Error: ' + (r.error || 'Unknown error'), true);
+    })
+    .withFailureHandler(err => showToast('Failed: ' + err.message, true))
+    .adminQueuePing(name);
+}
+
+function cancelTrigger(name) {
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.success) { showToast('Trigger cancelled'); fetchData(); }
+      else showToast('Error cancelling trigger', true);
+    })
+    .withFailureHandler(err => showToast('Failed: ' + err.message, true))
+    .adminCancelTrigger(name);
+}
+
+function togglePause(name, isPaused) {
+  showToast((isPaused ? 'Resuming ' : 'Pausing ') + name + '...');
+
+  function onSuccess(r) {
+    if (r.success) {
+      showToast('Developer ' + (isPaused ? 'resumed' : 'paused'));
+      fetchData();
+    } else {
+      showToast('Error: ' + r.error, true);
+    }
+  }
+  function onFail(err) {
+    showToast('Failed: ' + err.message, true);
+  }
+
+  if (isPaused) {
+    google.script.run.withSuccessHandler(onSuccess).withFailureHandler(onFail).adminResumeDeveloper(name);
+  } else {
+    google.script.run.withSuccessHandler(onSuccess).withFailureHandler(onFail).adminPauseDeveloper(name);
+  }
+}
+
+function sendTestPing() {
+  const name = document.getElementById('testName').value.trim() || 'Test User';
+  const status = document.getElementById('testStatus').value;
+  const msg = document.getElementById('testMessage').value.trim();
+  const resEl = document.getElementById('testResult');
+  
+  resEl.textContent = 'Sending...';
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.result === 'ok') { resEl.textContent = 'Success'; resEl.style.color='var(--green)'; fetchData(); }
+      else { resEl.textContent = 'Failed'; resEl.style.color='var(--red)'; }
+      setTimeout(() => resEl.textContent='', 3000);
+    })
+    .withFailureHandler(err => {
+      resEl.textContent = 'Error'; resEl.style.color='var(--red)';
+      showToast('Failed: ' + err.message, true);
+    })
+    .simulatePing(name, status, msg);
+}
+
+// Logs Modal
+let currentLogs = [];
+let currentLogFilter = 'all';
+
+function showLogs(name) {
+  document.getElementById('logsModalTitle').textContent = `Logs: ${name}`;
+  const mb = document.getElementById('logsModalBody');
+  mb.innerHTML = '<div class="loader-wrap"><div class="loader-ring"></div></div>';
+  document.getElementById('logsModal').classList.add('open');
+  
+  google.script.run
+    .withSuccessHandler(logs => {
+      currentLogs = logs || [];
+      currentLogFilter = 'all';
+      renderLogs();
+    })
+    .withFailureHandler(err => {
+      mb.innerHTML = '<div class="empty-state" style="color:var(--red)">Failed to load logs</div>';
+      showToast('Error: ' + err.message, true);
+    })
+    .getDeveloperLogs(name, 50);
+}
+
+function closeLogsModal() {
+  document.getElementById('logsModal').classList.remove('open');
+}
+
+function closeModal() {
+  document.getElementById('detailModal').classList.remove('open');
+}
+
+function renderLogs() {
+  const mb = document.getElementById('logsModalBody');
+  if (currentLogs.length === 0) {
+    mb.innerHTML = '<div class="empty-state">No logs found</div>';
+    return;
+  }
+  
+  const filters = `
+    <div class="timeline-filters">
+      <button class="tl-filter ${currentLogFilter==='all'?'active':''}" onclick="setLogFilter('all')">All</button>
+      <button class="tl-filter ${currentLogFilter==='success'?'active':''}" onclick="setLogFilter('success')">Success/Error</button>
+      <button class="tl-filter ${currentLogFilter==='progress'?'active':''}" onclick="setLogFilter('progress')">Pipeline</button>
+      <button class="tl-filter ${currentLogFilter==='heartbeat'?'active':''}" onclick="setLogFilter('heartbeat')">Heartbeats</button>
+    </div>
+  `;
+  
+  const filtered = currentLogs.filter(row => {
+    const s = String(row.status).trim().toUpperCase();
+    if (currentLogFilter === 'success') return s==='SUCCESS'||s==='ERROR'||s==='FAILURE';
+    if (currentLogFilter === 'progress') return s.includes('START')||s.includes('DONE')||s==='POLLING_ACK';
+    if (currentLogFilter === 'heartbeat') return s==='HEARTBEAT'||s==='WAITING'||s==='PONG';
+    return true;
+  });
+
+  const tlHtml = filtered.map(row => {
+    const d = new Date(row.timestamp);
+    const dStr = `${d.toLocaleDateString()} ${d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
+    const s = String(row.status).trim();
+    const sc = s.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const msg = row.message ? `<div class="tl-msg">${esc(row.message)}</div>` : '';
+    return `
+      <div class="tl-item tl-${sc}">
+        <div class="tl-ts" title="${dStr}">${timeSince(d)}</div>
+        <div class="tl-body">
+          <div style="font-weight:600;font-size:13px;color:var(--t1)">${esc(s)}</div>
+          ${msg}
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  mb.innerHTML = filters + `<div class="timeline">${tlHtml||'<div class="empty-state">No matching logs</div>'}</div>`;
+}
+
+function setLogFilter(f) {
+  currentLogFilter = f;
+  renderLogs();
+}
+
+// Auto-refresh
+function resetAutoRefresh() {
+  refreshCountdown = 30;
+  updateBadge();
+  clearInterval(countdownInterval);
+  clearTimeout(refreshTimer);
+  
+  countdownInterval = setInterval(() => {
+    if (isPaused()) {
+      document.getElementById('countdownBadge').innerHTML = `Auto-refresh paused`;
+      return;
+    }
+    refreshCountdown--;
+    updateBadge();
+    if (refreshCountdown <= 0) {
+      clearInterval(countdownInterval);
+      fetchData();
+    }
+  }, 1000);
+
+  if (!progressInterval) {
+    progressInterval = setInterval(() => {
+      if (isPaused()) return;
+      const expanded = Object.keys(expandState).filter(n => expandState[n]);
+      if (expanded.length > 0) fetchProgressBatch(expanded);
+    }, 3000);
+  }
+}
+
+function updateBadge() {
+  document.getElementById('countdownBadge').innerHTML = `Auto-refresh in <strong>${refreshCountdown}s</strong>`;
+}
+
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('button');
+  if (!btn) return;
+  var name = btn.dataset.name;
+
+  if (btn.classList.contains('js-force-run')) {
+    e.stopPropagation();
+    queueForceRunUser(name);
+  } else if (btn.classList.contains('js-ping')) {
+    e.stopPropagation();
+    queuePingUser(name);
+  } else if (btn.classList.contains('js-show-logs')) {
+    e.stopPropagation();
+    showLogs(name);
+  } else if (btn.classList.contains('js-cancel-trigger')) {
+    cancelTrigger(name);
+  } else if (btn.classList.contains('js-toggle-pause')) {
+    e.stopPropagation();
+    const isPaused = btn.dataset.paused === 'true';
+    togglePause(name, isPaused);
+  } else if (btn.classList.contains('js-remove-dev')) {
+    confirmDeleteDev(name);
+  }
+});
+
+document.addEventListener('input', function(e) {
+  if (e.target.id !== 'activeUsersSearch') return;
+  var q = e.target.value.trim().toLowerCase();
+  document.querySelectorAll('#activeUsersTbody tr').forEach(function(row) {
+    if (row.classList.contains('prog-row')) return;  // don't hide progress rows
+    var name = (row.firstElementChild && row.firstElementChild.textContent || '').toLowerCase();
+    var match = !q || name.indexOf(q) !== -1;
+    row.style.display = match ? '' : 'none';
+    // Also hide the following progress row if its parent is hidden
+    var next = row.nextElementSibling;
+    if (next && next.classList.contains('prog-row')) {
+      next.style.display = match ? '' : 'none';
+    }
+  });
+});
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('#testWebhookHeader')) return;
+  var body = document.getElementById('testWebhookBody');
+  var toggle = document.getElementById('testWebhookToggle');
+  var isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'flex';
+  toggle.innerHTML = isOpen ? '&#9656;' : '&#9662;';
+});
+
+window.onload = fetchData;
+</script>
