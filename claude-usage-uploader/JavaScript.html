@@ -11,6 +11,34 @@ let countdownInterval;
 let refreshTimer;
 let refreshCountdown = 30;
 let progressInterval = null;
+let currentPage = 'overview';
+
+const pageTitles = {
+  overview: 'Overview',
+  compliance: 'Compliance',
+  developers: 'Developers',
+  queue: 'Queue & Runs',
+  roster: 'Registration',
+  health: 'System Health'
+};
+
+function navigateTo(page) {
+  currentPage = page;
+  document.querySelectorAll('.page-view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  var target = document.getElementById('page-' + page);
+  if (target) target.classList.add('active');
+  var navBtn = document.querySelector('.nav-item[data-page="' + page + '"]');
+  if (navBtn) navBtn.classList.add('active');
+  document.getElementById('pageTitle').textContent = pageTitles[page] || page;
+  if (dashboardData && dashboardData.activeUsers) renderPageData(page);
+}
+
+function renderPageData(page) {
+  if (page === 'overview') renderOverviewKpis();
+  if (page === 'roster') renderRosterKpis();
+  if (page === 'health') renderHealthKpis();
+}
 
 function isPaused() {
   if (document.hidden) return true;
@@ -65,7 +93,7 @@ function fetchData() {
       dashboardData = res;
       renderDashboard();
       document.getElementById('loading').style.display = 'none';
-      document.getElementById('dashboard').style.display = 'block';
+      document.getElementById('appShell').style.display = 'flex';
       
       var now = new Date();
       var ts = now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
@@ -214,6 +242,12 @@ function renderDashboard() {
   }
   renderComplianceGrid();
   loadExpectedDevelopers();
+
+  // New page renderers
+  renderOverviewKpis();
+  renderDevRoster();
+  renderRosterKpis();
+  renderHealthKpis();
 }
 
 function renderComplianceGrid() {
@@ -699,5 +733,186 @@ function toggleRegList(wrapId, toggleId) {
   }
 }
 
+// ===================== NEW RENDERERS =====================
+
+function renderOverviewKpis() {
+  const { expectedDevelopers=[], registeredDevelopers=[], activeUsers=[], triggerQueue=[], complianceByWeek={}, currentWeek='' } = dashboardData;
+  const registeredNames = registeredDevelopers.map(r => r.name);
+  const unregisteredList = expectedDevelopers.filter(n => !registeredNames.includes(n));
+  const onlineCount = activeUsers.filter(u => {
+    const lb = u.lastHeartbeat ? new Date(u.lastHeartbeat) : 0;
+    const ls = u.lastSeen ? new Date(u.lastSeen) : 0;
+    const lp = u.lastPong ? new Date(u.lastPong) : 0;
+    const recent = new Date(Math.max(lb, ls, lp));
+    return recent.getTime() && (new Date() - recent) / 60000 < 10;
+  }).length;
+
+  const stats = complianceByWeek[currentWeek] || { expected:0, reported:0, failed:0, pending:0 };
+  const rate = stats.expected > 0 ? Math.round((stats.reported / stats.expected) * 100) : 0;
+
+  document.getElementById('overviewKpis').innerHTML = `
+    <div class="kpi-card"><div class="kpi-val sv-indigo">${stats.expected}</div><div class="kpi-label">Expected This Week</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-green">${stats.reported}</div><div class="kpi-label">Uploaded</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-amber">${stats.pending}</div><div class="kpi-label">Pending</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-red">${stats.failed}</div><div class="kpi-label">Failed</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-cyan">${rate}%</div><div class="kpi-label">Compliance</div></div>
+    <div class="kpi-card"><div class="kpi-val" style="color:var(--green)">${onlineCount}</div><div class="kpi-label">Online Now</div></div>
+    <div class="kpi-card"><div class="kpi-val" style="color:var(--purple)">${triggerQueue.length}</div><div class="kpi-label">Queued Runs</div></div>
+  `;
+
+  // Alert Rail
+  var alerts = [];
+  if (stats.pending > 0) alerts.push({ cls: 'alert-warn', text: stats.pending + ' developers pending this week' });
+  if (stats.failed > 0) alerts.push({ cls: 'alert-crit', text: stats.failed + ' upload failures detected' });
+  if (unregisteredList.length > 0) alerts.push({ cls: 'alert-warn', text: unregisteredList.length + ' developers not yet registered' });
+  if (triggerQueue.length > 0) alerts.push({ cls: 'alert-info', text: triggerQueue.length + ' force runs queued' });
+  if (rate === 100) alerts.push({ cls: 'alert-ok', text: 'Full compliance achieved this week' });
+
+  document.getElementById('alertRail').innerHTML = alerts.map(a =>
+    `<div class="alert-chip ${a.cls}">${a.text}</div>`
+  ).join('');
+
+  // Exceptions Table
+  renderExceptions();
+}
+
+function renderExceptions() {
+  const { expectedDevelopers=[], registeredDevelopers=[], activeUsers=[], complianceByWeek={}, currentWeek='' } = dashboardData;
+  const registeredNames = registeredDevelopers.map(r => r.name);
+  const stats = complianceByWeek[currentWeek] || { details: [] };
+  const details = stats.details || [];
+  var exceptions = [];
+
+  expectedDevelopers.forEach(name => {
+    const isReg = registeredNames.includes(name);
+    const activeU = activeUsers.find(u => u.name === name);
+    const wkDet = details.find(d => d.name === name);
+    const uploaded = wkDet && wkDet.status === 'SUCCESS';
+    const failed = wkDet && (wkDet.status === 'FAILURE' || wkDet.status === 'ERROR');
+
+    var issue = '', priority = 0;
+    if (failed) { issue = 'Upload failed'; priority = 3; }
+    else if (!isReg) { issue = 'Not registered'; priority = 2; }
+    else if (!uploaded) { issue = 'Pending upload'; priority = 1; }
+
+    if (issue) {
+      var presence = 'Unknown';
+      if (activeU) {
+        const lb = activeU.lastHeartbeat ? new Date(activeU.lastHeartbeat) : 0;
+        const ls = activeU.lastSeen ? new Date(activeU.lastSeen) : 0;
+        const recent = new Date(Math.max(lb, ls));
+        if (recent.getTime() && (new Date() - recent) / 60000 < 10) presence = 'Online';
+        else if (recent.getTime() && (new Date() - recent) / 60000 < 60) presence = 'Away';
+        else presence = 'Offline';
+      }
+      exceptions.push({ name, issue, presence, lastUpload: activeU ? timeSince(activeU.lastUpload) : 'Never', priority });
+    }
+  });
+
+  exceptions.sort((a, b) => b.priority - a.priority);
+  const tbody = document.getElementById('exceptionsTbody');
+  const tbl = document.getElementById('exceptionsTable');
+  const empty = document.getElementById('exceptionsEmpty');
+
+  if (exceptions.length === 0) {
+    tbl.style.display = 'none'; empty.style.display = 'block';
+  } else {
+    tbl.style.display = 'table'; empty.style.display = 'none';
+    tbody.innerHTML = exceptions.map(e => {
+      var issueCls = e.priority === 3 ? 'b-red' : e.priority === 2 ? 'b-amber' : 'b-grey';
+      var presCls = e.presence === 'Online' ? 'b-green' : e.presence === 'Away' ? 'b-amber' : 'b-grey';
+      return `<tr>
+        <td style="font-weight:600">${esc(e.name)}</td>
+        <td><span class="badge ${issueCls}">${esc(e.issue)}</span></td>
+        <td><span class="badge ${presCls}">${esc(e.presence)}</span></td>
+        <td style="font-size:12px;color:var(--t3)">${e.lastUpload}</td>
+        <td><button class="btn btn-primary btn-sm js-force-run" data-name="${esc(e.name)}">&#9654; Generate</button></td>
+      </tr>`;
+    }).join('');
+  }
+}
+
+function renderRosterKpis() {
+  const { expectedDevelopers=[], registeredDevelopers=[] } = dashboardData;
+  const registeredNames = registeredDevelopers.map(r => r.name);
+  const pending = expectedDevelopers.filter(n => !registeredNames.includes(n)).length;
+  const rate = expectedDevelopers.length > 0 ? Math.round((registeredNames.length / expectedDevelopers.length) * 100) : 0;
+
+  document.getElementById('rosterKpis').innerHTML = `
+    <div class="kpi-card"><div class="kpi-val sv-indigo">${expectedDevelopers.length}</div><div class="kpi-label">Expected</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-green">${registeredNames.length}</div><div class="kpi-label">Registered</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-amber">${pending}</div><div class="kpi-label">Pending</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-cyan">${rate}%</div><div class="kpi-label">Coverage</div></div>
+  `;
+}
+
+function renderHealthKpis() {
+  const { activeUsers=[], triggerQueue=[] } = dashboardData;
+  const online = activeUsers.filter(u => {
+    const lb = u.lastHeartbeat ? new Date(u.lastHeartbeat) : 0;
+    const ls = u.lastSeen ? new Date(u.lastSeen) : 0;
+    const recent = new Date(Math.max(lb, ls));
+    return recent.getTime() && (new Date() - recent) / 60000 < 10;
+  }).length;
+
+  document.getElementById('healthKpis').innerHTML = `
+    <div class="kpi-card"><div class="kpi-val sv-green">${online}</div><div class="kpi-label">Online</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-amber">${activeUsers.length - online}</div><div class="kpi-label">Offline</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-indigo">${activeUsers.length}</div><div class="kpi-label">Total Agents</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-cyan">${triggerQueue.length}</div><div class="kpi-label">Pending Ops</div></div>
+  `;
+}
+
+function renderDevRoster() {
+  const { expectedDevelopers=[], registeredDevelopers=[], activeUsers=[], complianceByWeek={}, currentWeek='' } = dashboardData;
+  const registeredNames = registeredDevelopers.map(r => r.name);
+  const stats = complianceByWeek[currentWeek] || { details: [] };
+  const details = stats.details || [];
+  const tbody = document.getElementById('devRosterTbody');
+  if (!tbody) return;
+
+  tbody.innerHTML = expectedDevelopers.map(name => {
+    const isReg = registeredNames.includes(name);
+    const activeU = activeUsers.find(u => u.name === name);
+    const wkDet = details.find(d => d.name === name);
+
+    var regBadge = isReg ? '<span class="badge b-green">Registered</span>' : '<span class="badge b-amber">Pending</span>';
+    var presBadge = '<span class="badge b-grey">Unknown</span>';
+    if (activeU) presBadge = getStatusDotHtml(activeU);
+
+    var weekBadge = '<span class="badge b-grey">Pending</span>';
+    if (wkDet && wkDet.status === 'SUCCESS') weekBadge = '<span class="badge b-green">Uploaded</span>';
+    else if (wkDet && (wkDet.status === 'FAILURE' || wkDet.status === 'ERROR')) weekBadge = '<span class="badge b-red">Failed</span>';
+
+    var lastUp = activeU && activeU.lastUpload ? timeSince(activeU.lastUpload) : 'Never';
+
+    return `<tr>
+      <td style="font-weight:600">${esc(name)}</td>
+      <td>${regBadge}</td>
+      <td><div class="status-cell">${presBadge}</div></td>
+      <td>${weekBadge}</td>
+      <td style="font-size:12px;color:var(--t3)">${lastUp}</td>
+      <td>
+        <div class="action-cell">
+          <button class="btn btn-primary btn-sm js-force-run" data-name="${esc(name)}">&#9654;</button>
+          <button class="btn btn-ghost btn-sm js-show-logs" data-name="${esc(name)}">Logs</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// Global Search
+document.getElementById('globalSearch').addEventListener('input', function(e) {
+  var q = e.target.value.trim().toLowerCase();
+  // Apply to visible tables on the current page
+  document.querySelectorAll('.page-view.active .data-table tbody tr').forEach(function(row) {
+    if (row.classList.contains('prog-row')) return;
+    var name = (row.firstElementChild && row.firstElementChild.textContent || '').toLowerCase();
+    row.style.display = (!q || name.indexOf(q) !== -1) ? '' : 'none';
+  });
+});
+
 window.onload = fetchData;
 </script>
+
