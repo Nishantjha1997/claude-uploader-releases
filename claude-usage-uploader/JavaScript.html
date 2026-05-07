@@ -687,5 +687,17 @@ document.addEventListener('click', function(e) {
   toggle.innerHTML = isOpen ? '&#9656;' : '&#9662;';
 });
 
+function toggleRegList(wrapId, toggleId) {
+  var wrap = document.getElementById(wrapId);
+  var icon = document.getElementById(toggleId);
+  if (wrap.style.display === 'none') {
+    wrap.style.display = 'block';
+    icon.style.transform = 'rotate(0deg)';
+  } else {
+    wrap.style.display = 'none';
+    icon.style.transform = 'rotate(-90deg)';
+  }
+}
+
 window.onload = fetchData;
 </script>
