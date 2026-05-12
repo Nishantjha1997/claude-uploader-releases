@@ -5,22 +5,25 @@
 
 // -------------------- WEBHOOK AUTH --------------------
 var WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
-var HMAC_STALE_SECS = 300;  // reject requests older than 5 minutes
+var HMAC_STALE_SECS = 3600;  // tolerate up to 1 hour of system clock drift
 
 function computeHmac256_(secret, message) {
   var raw = Utilities.computeHmacSha256Signature(message, secret);
   return raw.map(function(b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join('');
 }
 
+// Returns '' on success, or a short reason string on failure.
 function verifyWebhookSignature_(e) {
   var ts  = (e.parameter && e.parameter._ts)  ? e.parameter._ts  : '';
   var sig = (e.parameter && e.parameter._sig) ? e.parameter._sig : '';
-  if (!ts || !sig) return false;
+  if (!ts || !sig) return 'missing_params';
   var now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - parseInt(ts, 10)) > HMAC_STALE_SECS) return false;
+  var age = Math.abs(now - parseInt(ts, 10));
+  if (age > HMAC_STALE_SECS) return 'stale_ts (' + age + 's, limit ' + HMAC_STALE_SECS + 's)';
   var body = (e.postData && e.postData.contents) ? e.postData.contents : '';
   var expected = computeHmac256_(WEBHOOK_HMAC_SECRET, ts + '.' + body);
-  return sig === expected;
+  if (sig !== expected) return 'sig_mismatch';
+  return '';
 }
 
 // -------------------- STATUS CONSTANTS --------------------
@@ -583,9 +586,14 @@ function getDashboardData_uncached_() {
 // -------------------- WEBHOOK (POST) --------------------
 
 function doPost(e) {
-  if (!verifyWebhookSignature_(e)) {
+  var sigErr = verifyWebhookSignature_(e);
+  if (sigErr) {
+    // Parse name for the log if we can (best-effort — body may be malformed)
+    var rejName = 'unknown';
+    try { rejName = JSON.parse(e.postData.contents).name || rejName; } catch (_) {}
+    log_('doPost: signature rejected for "' + rejName + '" — ' + sigErr);
     return ContentService
-      .createTextOutput(JSON.stringify({ result: 'error', error: 'invalid_signature' }))
+      .createTextOutput(JSON.stringify({ result: 'error', error: 'invalid_signature', reason: sigErr }))
       .setMimeType(ContentService.MimeType.JSON);
   }
   try {

@@ -392,13 +392,36 @@ function sendPingOnce(payload) {
       },
       timeout: PING_TIMEOUT_MS,
     };
+    const checkBody = (statusCode, rawBody) => {
+      // If GAS rejected the signature it returns a JSON error body.
+      // Detect it regardless of HTTP status so a silent rejection surfaces loudly.
+      try {
+        const parsed = JSON.parse(rawBody);
+        if (parsed.result === 'error') {
+          if (parsed.error === 'invalid_signature') {
+            log(`CRITICAL: GAS rejected webhook signature (${parsed.reason || parsed.error}). ` +
+                `Verify system clock is accurate — tolerance is 1 hour.`);
+          }
+          return { ok: false, status: statusCode, body: rawBody };
+        }
+      } catch (_) { /* non-JSON body — not an application-level error */ }
+      return { ok: true, status: statusCode, body: rawBody };
+    };
+
     const req = https.request(options, res => {
       let body = '';
       res.on('data', c => { body += c; });
       res.on('end', () => {
-        // GAS web apps return 302 on successful POST (redirect to ack page); treat as success.
-        const ok = (res.statusCode >= 200 && res.statusCode < 300) || res.statusCode === 302;
-        resolve({ ok, status: res.statusCode, body });
+        // GAS web apps redirect the POST response; follow once to get the actual JSON body.
+        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+          https.get(res.headers.location, r2 => {
+            let b2 = '';
+            r2.on('data', c => b2 += c);
+            r2.on('end', () => resolve(checkBody(res.statusCode, b2)));
+          }).on('error', () => resolve({ ok: true, status: res.statusCode, body }));
+          return;
+        }
+        resolve(checkBody(res.statusCode, body));
       });
     });
     req.on('error', (err) => resolve({ ok: false, status: 0, body: err.message }));
