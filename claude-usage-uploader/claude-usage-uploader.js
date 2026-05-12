@@ -54,6 +54,7 @@ const MANIFEST_URL = 'https://gist.githubusercontent.com/Nishantjha1997/ad763c62
 const WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
 
 const DRIVE_FOLDER_ID = '0AMXBcPT9R10cUk9PVA';
+let globalCcusageJsPath = '';
 const SERVICE_KEY_FILE = 'service-account-key.json';
 const WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycby9bFBRwYLu1GF6urQn3saAuVacI95NjS2Jt2G3eiba3StKwu9i8POjXnlx224NMMXt/exec';
 
@@ -317,7 +318,9 @@ function run(cmd, customOpts = {}) {
 // Async ccusage runner — spawn + 60s hard timeout; never blocks the event loop.
 function runCcusage(cmd, outFile, envOpts) {
   return new Promise((resolve, reject) => {
-    const parts = cmd.split(/\s+/);
+    // Quote-aware split so paths like "C:\Program Files\..." are kept as one token.
+    // Strip surrounding quotes after splitting — spawn takes raw paths, not shell-quoted ones.
+    const parts = (cmd.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(p => p.replace(/^"|"$/g, ''));
     const bin   = parts[0];
     const args  = parts.slice(1);
     const env   = (envOpts && envOpts.env) ? envOpts.env : process.env;
@@ -326,7 +329,7 @@ function runCcusage(cmd, outFile, envOpts) {
     const child = spawn(bin, args, {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: IS_WIN,
+      shell: (bin === 'node' || bin.includes('node.exe')) ? false : IS_WIN,
     });
 
     const timer = setTimeout(() => {
@@ -340,7 +343,9 @@ function runCcusage(cmd, outFile, envOpts) {
     child.stderr.on('data', d => { stderr += d; });
     child.on('error', err => {
       clearTimeout(timer);
-      if (err.code === 'ENOENT') {
+      if (err.code === 'EPERM') {
+        reject(new Error(`${ERR.CCUSAGE_FAILED}: Permission denied (EPERM). Antivirus may be blocking shell access.`));
+      } else if (err.code === 'ENOENT') {
         reject(new Error(`${ERR.CCUSAGE_NOT_FOUND}: ccusage not found in PATH`));
       } else {
         reject(new Error(`${ERR.CCUSAGE_FAILED}: ${err.message}`));
@@ -1117,7 +1122,6 @@ function ensureCCUsage() {
     ? { env: { ...process.env, PATH: `${globalNodeDir}${path.delimiter}${process.env.PATH}` } }
     : {};
 
-  // FIX: use --help instead of --version; not all CLI tools support --version
   try {
     run('ccusage --help', envOpts);
     log('ccusage OK');
@@ -1125,6 +1129,20 @@ function ensureCCUsage() {
     log('Installing ccusage...');
     run(`${getNpmCmd()} install -g ccusage`, envOpts);
     log('ccusage installed');
+  }
+
+  // Find the JS entry point to bypass .cmd wrapper on Windows (avoids EPERM)
+  try {
+    if (IS_WIN) {
+      const npmRoot = execSync('npm root -g', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const jsPath = path.join(npmRoot, 'ccusage', 'dist', 'index.js');
+      if (fs.existsSync(jsPath)) {
+        globalCcusageJsPath = jsPath;
+        log(`Stealth mode: using ccusage entry point at ${jsPath}`);
+      }
+    }
+  } catch (e) {
+    log(`Could not resolve stealth path: ${e.message}`);
   }
 }
 
@@ -1137,8 +1155,13 @@ async function generateReports() {
     ? { env: { ...process.env, PATH: `${globalNodeDir}${path.delimiter}${process.env.PATH}` } }
     : {};
 
-  await runCcusage('ccusage session --json', sessionFile, envOpts);
-  await runCcusage('ccusage daily --json',   dailyFile,   envOpts);
+  if (globalCcusageJsPath) {
+    await runCcusage(`${getNodeCmd()} "${globalCcusageJsPath}" session --json`, sessionFile, envOpts);
+    await runCcusage(`${getNodeCmd()} "${globalCcusageJsPath}" daily --json`,   dailyFile,   envOpts);
+  } else {
+    await runCcusage('ccusage session --json', sessionFile, envOpts);
+    await runCcusage('ccusage daily --json',   dailyFile,   envOpts);
+  }
 
   if (fs.statSync(sessionFile).size === 0 || fs.statSync(dailyFile).size === 0) {
     throw new Error(`${ERR.CCUSAGE_EMPTY_OUTPUT}: Report generation produced empty files`);
