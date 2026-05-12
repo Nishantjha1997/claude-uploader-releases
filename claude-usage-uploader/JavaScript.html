@@ -78,11 +78,12 @@ function getStatusDotHtml(user) {
   const ls = user.lastSeen ? new Date(user.lastSeen) : 0;
   const lp = user.lastPong ? new Date(user.lastPong) : 0;
   const recent = new Date(Math.max(lb, ls, lp));
-  if (!recent.getTime()) return '<span class="status-dot dot-offline" title="Never seen"></span> Offline';
+  if (!recent.getTime()) return '<span class="status-dot dot-stalled" title="STALLED — never seen"></span> <b style="color:var(--red)">Stalled</b>';
   const minAgo = (new Date() - recent) / 60000;
-  if (minAgo < 10) return '<span class="status-dot dot-online" title="Online (<10m ago)"></span> Online';
-  if (minAgo < 60) return '<span class="status-dot dot-away" title="Away (10m-1h ago)"></span> Away';
-  return '<span class="status-dot dot-offline" title="Offline (>1h ago)"></span> Offline';
+  if (minAgo < 10)   return '<span class="status-dot dot-online"  title="Online (<10m ago)"></span> Online';
+  if (minAgo < 60)   return '<span class="status-dot dot-away"    title="Away (10–60m ago)"></span> Away';
+  if (minAgo < 1440) return '<span class="status-dot dot-offline" title="Offline (1h–24h ago)"></span> Offline';
+  return '<span class="status-dot dot-stalled" title="STALLED — no heartbeat for >24h"></span> <b style="color:var(--red)">Stalled</b>';
 }
 
 function fetchData() {
@@ -271,6 +272,22 @@ function renderComplianceGrid() {
       <td><span style="font-size:11px;color:var(--t3)">${timeSince(d.lastSeen)}</span></td>
     </tr>
   `).join('');
+}
+
+// Send compliance reminders
+function sendReminders() {
+  const btn = document.getElementById('sendRemindersBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Sending…'; }
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (btn) { btn.disabled = false; btn.textContent = '✉ Send Reminders'; }
+      showToast(res.message || 'Done', !res.success);
+    })
+    .withFailureHandler(function(err) {
+      if (btn) { btn.disabled = false; btn.textContent = '✉ Send Reminders'; }
+      showToast('Send failed: ' + err.message, true);
+    })
+    .sendComplianceReminders();
 }
 
 // Progress
@@ -790,21 +807,25 @@ function renderExceptions() {
     const uploaded = wkDet && wkDet.status === 'SUCCESS';
     const failed = wkDet && (wkDet.status === 'FAILURE' || wkDet.status === 'ERROR');
 
+    var presence = 'Unknown';
+    if (activeU) {
+      const lb = activeU.lastHeartbeat ? new Date(activeU.lastHeartbeat) : 0;
+      const ls = activeU.lastSeen ? new Date(activeU.lastSeen) : 0;
+      const recent = new Date(Math.max(lb, ls));
+      const minAgo = recent.getTime() ? (new Date() - recent) / 60000 : Infinity;
+      if (minAgo < 10)   presence = 'Online';
+      else if (minAgo < 60)   presence = 'Away';
+      else if (minAgo < 1440) presence = 'Offline';
+      else presence = 'Stalled';
+    }
+
     var issue = '', priority = 0;
-    if (failed) { issue = 'Upload failed'; priority = 3; }
-    else if (!isReg) { issue = 'Not registered'; priority = 2; }
-    else if (!uploaded) { issue = 'Pending upload'; priority = 1; }
+    if (presence === 'Stalled' && isReg) { issue = 'Service stalled'; priority = 4; }
+    else if (failed)   { issue = 'Upload failed';  priority = 3; }
+    else if (!isReg)   { issue = 'Not registered'; priority = 2; }
+    else if (!uploaded){ issue = 'Pending upload'; priority = 1; }
 
     if (issue) {
-      var presence = 'Unknown';
-      if (activeU) {
-        const lb = activeU.lastHeartbeat ? new Date(activeU.lastHeartbeat) : 0;
-        const ls = activeU.lastSeen ? new Date(activeU.lastSeen) : 0;
-        const recent = new Date(Math.max(lb, ls));
-        if (recent.getTime() && (new Date() - recent) / 60000 < 10) presence = 'Online';
-        else if (recent.getTime() && (new Date() - recent) / 60000 < 60) presence = 'Away';
-        else presence = 'Offline';
-      }
       exceptions.push({ name, issue, presence, lastUpload: activeU ? timeSince(activeU.lastUpload) : 'Never', priority });
     }
   });
@@ -819,8 +840,8 @@ function renderExceptions() {
   } else {
     tbl.style.display = 'table'; empty.style.display = 'none';
     tbody.innerHTML = exceptions.map(e => {
-      var issueCls = e.priority === 3 ? 'b-red' : e.priority === 2 ? 'b-amber' : 'b-grey';
-      var presCls = e.presence === 'Online' ? 'b-green' : e.presence === 'Away' ? 'b-amber' : 'b-grey';
+      var issueCls = e.priority >= 4 ? 'b-red' : e.priority === 3 ? 'b-red' : e.priority === 2 ? 'b-amber' : 'b-grey';
+      var presCls = e.presence === 'Online' ? 'b-green' : e.presence === 'Away' ? 'b-amber' : e.presence === 'Stalled' ? 'b-red' : 'b-grey';
       return `<tr>
         <td style="font-weight:600">${esc(e.name)}</td>
         <td><span class="badge ${issueCls}">${esc(e.issue)}</span></td>
@@ -848,17 +869,22 @@ function renderRosterKpis() {
 
 function renderHealthKpis() {
   const { activeUsers=[], triggerQueue=[] } = dashboardData;
-  const online = activeUsers.filter(u => {
+  let online = 0, stalled = 0;
+  activeUsers.forEach(u => {
     const lb = u.lastHeartbeat ? new Date(u.lastHeartbeat) : 0;
     const ls = u.lastSeen ? new Date(u.lastSeen) : 0;
     const recent = new Date(Math.max(lb, ls));
-    return recent.getTime() && (new Date() - recent) / 60000 < 10;
-  }).length;
+    if (!recent.getTime()) { stalled++; return; }
+    const minAgo = (new Date() - recent) / 60000;
+    if (minAgo < 10) online++;
+    else if (minAgo >= 1440) stalled++;
+  });
 
+  const stalledCls = stalled > 0 ? 'sv-red' : 'sv-green';
   document.getElementById('healthKpis').innerHTML = `
     <div class="kpi-card"><div class="kpi-val sv-green">${online}</div><div class="kpi-label">Online</div></div>
-    <div class="kpi-card"><div class="kpi-val sv-amber">${activeUsers.length - online}</div><div class="kpi-label">Offline</div></div>
-    <div class="kpi-card"><div class="kpi-val sv-indigo">${activeUsers.length}</div><div class="kpi-label">Total Agents</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-amber">${activeUsers.length - online - stalled}</div><div class="kpi-label">Offline</div></div>
+    <div class="kpi-card"><div class="kpi-val ${stalledCls}">${stalled}</div><div class="kpi-label">Stalled</div></div>
     <div class="kpi-card"><div class="kpi-val sv-cyan">${triggerQueue.length}</div><div class="kpi-label">Pending Ops</div></div>
   `;
 }
