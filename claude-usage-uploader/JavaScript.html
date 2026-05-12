@@ -109,6 +109,7 @@ function fetchData() {
     }
   }).withFailureHandler(function(err) {
     showToast('Failed to load data: ' + err.message, true);
+    document.getElementById('loading').style.display = 'none';
     rb.disabled = false; rb.classList.remove('loading'); rb.innerHTML = '&#8635; Refresh';
   }).getDashboardData();
 }
@@ -174,9 +175,8 @@ function renderDashboard() {
     if (expandedNames.length > 0) fetchProgressBatch(expandedNames);
   }
 
-  // Registration
-  document.getElementById('registeredList').innerHTML = registeredList.map(n => `<li><span class="dev-name">${esc(n)}</span><span class="dev-date">&#10003;</span></li>`).join('');
-  document.getElementById('unregisteredList').innerHTML = unregisteredList.map(n => `<li><span class="dev-name unreg">${esc(n)}</span><span class="dev-date">&#9888;</span></li>`).join('');
+  // Registration logic (KPIs handled in renderOverviewKpis)
+
   
   // Upload Summary
   const tbSum = document.getElementById('uploadSummaryBody');
@@ -263,13 +263,17 @@ function renderComplianceGrid() {
   var rate = stats.expected > 0 ? Math.round((stats.reported / stats.expected) * 100) : 0;
   document.getElementById('compRate').textContent = rate + '%';
   
-  document.querySelector('#complianceTable tbody').innerHTML = stats.details.map(d => `
+  const auMap = {};
+  (dashboardData.activeUsers || []).forEach(u => { auMap[u.name] = u; });
+  document.querySelector('#complianceTable tbody').innerHTML = stats.details.map(d => {
+    const au = auMap[d.name];
+    return `
     <tr>
       <td style="font-weight:500">${esc(d.name)}</td>
       <td>${getBadgeHtml(d.status)}</td>
-      <td><span style="font-size:11px;color:var(--t3)">${timeSince(d.lastSeen)}</span></td>
-    </tr>
-  `).join('');
+      <td><span style="font-size:11px;color:var(--t3)">${timeSince(au ? au.lastSeen : null)}</span></td>
+    </tr>`;
+  }).join('');
 }
 
 // Send compliance reminders
