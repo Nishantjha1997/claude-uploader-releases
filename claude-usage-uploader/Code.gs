@@ -3,6 +3,26 @@
 // Code.gs (Server-side logic)
 // ================================================================
 
+// -------------------- WEBHOOK AUTH --------------------
+var WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
+var HMAC_STALE_SECS = 300;  // reject requests older than 5 minutes
+
+function computeHmac256_(secret, message) {
+  var raw = Utilities.computeHmacSha256Signature(message, secret);
+  return raw.map(function(b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join('');
+}
+
+function verifyWebhookSignature_(e) {
+  var ts  = (e.parameter && e.parameter._ts)  ? e.parameter._ts  : '';
+  var sig = (e.parameter && e.parameter._sig) ? e.parameter._sig : '';
+  if (!ts || !sig) return false;
+  var now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - parseInt(ts, 10)) > HMAC_STALE_SECS) return false;
+  var body = (e.postData && e.postData.contents) ? e.postData.contents : '';
+  var expected = computeHmac256_(WEBHOOK_HMAC_SECRET, ts + '.' + body);
+  return sig === expected;
+}
+
 // -------------------- STATUS CONSTANTS --------------------
 var STATUS = {
   REGISTERED:     'REGISTERED',
@@ -543,6 +563,11 @@ function getDashboardData_uncached_() {
 // -------------------- WEBHOOK (POST) --------------------
 
 function doPost(e) {
+  if (!verifyWebhookSignature_(e)) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ result: 'error', error: 'invalid_signature' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
   try {
     var payload = JSON.parse(e.postData.contents);
     var name            = payload.name            || 'UNKNOWN';
@@ -588,7 +613,13 @@ function doPost(e) {
 
 function simulatePing(name, status, message) {
   requireAdmin_();
-  var e = { postData: { contents: JSON.stringify({ name: name, status: status, message: message }) } };
+  var body = JSON.stringify({ name: name, status: status, message: message });
+  var ts   = Math.floor(Date.now() / 1000).toString();
+  var sig  = computeHmac256_(WEBHOOK_HMAC_SECRET, ts + '.' + body);
+  var e = {
+    postData:  { contents: body },
+    parameter: { _ts: ts, _sig: sig }
+  };
   doPost(e);
   return { result: 'ok' };
 }

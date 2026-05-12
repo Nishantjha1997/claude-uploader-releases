@@ -38,7 +38,7 @@ const IS_LINUX = process.platform === 'linux';
 const PLATFORM_KEY = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
 
 // -------------------- CONFIGURATION --------------------
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const FORCE_RUN = process.argv.includes('--force');
 
 // -------------------- SERVICE LOOP INTERVALS --------------------
@@ -48,6 +48,10 @@ const UPLOAD_CHECK_MS       = 60  * 60 * 1000;    // check if upload due every h
 const UPDATE_CHECK_MS       = 24  * 60 * 60 * 1000; // check for updates every 24h
 
 const MANIFEST_URL = 'https://gist.githubusercontent.com/Nishantjha1997/ad763c62484a3ea70e7507bf671df0bb/raw/version.json';
+
+// Shared HMAC secret between uploader and GAS webhook endpoint.
+// GAS validates X-Uploader-Signature on every incoming request.
+const WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
 
 const DRIVE_FOLDER_ID = '0AMXBcPT9R10cUk9PVA';
 const SERVICE_KEY_FILE = 'service-account-key.json';
@@ -251,6 +255,26 @@ function showTaskResult(data){
 
 const MAX_RETRIES = 3;
 const CMD_TIMEOUT = 30000;
+const CCUSAGE_TIMEOUT_MS = 60000;
+
+// -------------------- ERROR CODE TAXONOMY --------------------
+const ERR = Object.freeze({
+  CCUSAGE_NOT_FOUND:    'CCUSAGE_NOT_FOUND',
+  CCUSAGE_TIMEOUT:      'CCUSAGE_TIMEOUT',
+  CCUSAGE_EMPTY_OUTPUT: 'CCUSAGE_EMPTY_OUTPUT',
+  CCUSAGE_INVALID_JSON: 'CCUSAGE_INVALID_JSON',
+  CCUSAGE_FAILED:       'CCUSAGE_FAILED',
+  AUTH_KEY_MISSING:     'AUTH_KEY_MISSING',
+  DRIVE_AUTH_FAILED:    'DRIVE_AUTH_FAILED',
+  DRIVE_RATE_LIMITED:   'DRIVE_RATE_LIMITED',
+  DRIVE_QUOTA_EXCEEDED: 'DRIVE_QUOTA_EXCEEDED',
+  DRIVE_UPLOAD_FAILED:  'DRIVE_UPLOAD_FAILED',
+  DRIVE_VERIFY_FAILED:  'DRIVE_VERIFY_FAILED',
+  CREDENTIALS_MISSING:  'CREDENTIALS_MISSING',
+  WATCHDOG_STALL:       'WATCHDOG_STALL',
+  NO_DATA:              'NO_DATA',
+  UNKNOWN_ERROR:        'UNKNOWN_ERROR',
+});
 
 let globalNodeDir = '';
 
@@ -290,19 +314,82 @@ function run(cmd, customOpts = {}) {
   }
 }
 
+// Async ccusage runner — spawn + 60s hard timeout; never blocks the event loop.
+function runCcusage(cmd, outFile, envOpts) {
+  return new Promise((resolve, reject) => {
+    const parts = cmd.split(/\s+/);
+    const bin   = parts[0];
+    const args  = parts.slice(1);
+    const env   = (envOpts && envOpts.env) ? envOpts.env : process.env;
+    let timedOut = false;
+
+    const child = spawn(bin, args, {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: IS_WIN,
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, CCUSAGE_TIMEOUT_MS);
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d; });
+    child.stderr.on('data', d => { stderr += d; });
+    child.on('error', err => {
+      clearTimeout(timer);
+      if (err.code === 'ENOENT') {
+        reject(new Error(`${ERR.CCUSAGE_NOT_FOUND}: ccusage not found in PATH`));
+      } else {
+        reject(new Error(`${ERR.CCUSAGE_FAILED}: ${err.message}`));
+      }
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${ERR.CCUSAGE_TIMEOUT}: ccusage timed out after ${CCUSAGE_TIMEOUT_MS / 1000}s`));
+        return;
+      }
+      if (code !== 0) {
+        const detail = stderr.trim() || `exit code ${code}`;
+        reject(new Error(`${ERR.CCUSAGE_FAILED}: ccusage exited ${code}; ${detail}`));
+        return;
+      }
+      try {
+        fs.writeFileSync(outFile, stdout);
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
 // -------------------- PING --------------------
 // extra: optional object with additional fields (e.g. { nextPollAt })
 
 // Single attempt — resolves {ok, status, body}, never rejects.
+// HMAC signature sent as ?_ts=<unix>&_sig=<hex> so GAS doPost can read via e.parameter.
 function sendPingOnce(payload) {
   return new Promise((resolve) => {
     const data = JSON.stringify(payload);
+    const ts = Math.floor(Date.now() / 1000).toString();
+    const sig = crypto.createHmac('sha256', WEBHOOK_HMAC_SECRET)
+      .update(ts + '.' + data)
+      .digest('hex');
     const url = new URL(WEBHOOK_URL);
+    url.searchParams.set('_ts', ts);
+    url.searchParams.set('_sig', sig);
     const options = {
       hostname: url.hostname,
       path: url.pathname + url.search,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
       timeout: PING_TIMEOUT_MS,
     };
     const req = https.request(options, res => {
@@ -548,7 +635,7 @@ function checkForAdminTrigger(name) {
 // -------------------- VALIDATION --------------------
 function validateSetup() {
   if (!fs.existsSync(GOOGLE_KEY_FILE)) {
-    throw new Error(`Missing Google service account key: ${GOOGLE_KEY_FILE}`);
+    throw new Error(`${ERR.AUTH_KEY_MISSING}: Missing Google service account key: ${GOOGLE_KEY_FILE}`);
   }
 }
 
@@ -1018,7 +1105,7 @@ function ensureCCUsage() {
 }
 
 // -------------------- REPORT --------------------
-function generateReports() {
+async function generateReports() {
   const sessionFile = path.join(os.tmpdir(), 'session.json');
   const dailyFile   = path.join(os.tmpdir(), 'daily.json');
 
@@ -1026,18 +1113,18 @@ function generateReports() {
     ? { env: { ...process.env, PATH: `${globalNodeDir}${path.delimiter}${process.env.PATH}` } }
     : {};
 
-  fs.writeFileSync(sessionFile, run('ccusage session --json', envOpts));
-  fs.writeFileSync(dailyFile,   run('ccusage daily --json',   envOpts));
+  await runCcusage('ccusage session --json', sessionFile, envOpts);
+  await runCcusage('ccusage daily --json',   dailyFile,   envOpts);
 
   if (fs.statSync(sessionFile).size === 0 || fs.statSync(dailyFile).size === 0) {
-    throw new Error('Report generation produced empty files');
+    throw new Error(`${ERR.CCUSAGE_EMPTY_OUTPUT}: Report generation produced empty files`);
   }
 
   try {
     JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
     JSON.parse(fs.readFileSync(dailyFile,   'utf8'));
   } catch {
-    throw new Error('Report files contain invalid JSON');
+    throw new Error(`${ERR.CCUSAGE_INVALID_JSON}: Report files contain invalid JSON`);
   }
 
   log('Reports generated and validated');
@@ -1098,6 +1185,20 @@ async function upload(name, sessionFile, dailyFile) {
     return (data.files && data.files[0]) ? data.files[0].id : null;
   }
 
+  async function verifyFileInFolder(fileId, fileName) {
+    const res = await nodeFetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,parents&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) throw new Error(`${ERR.DRIVE_VERIFY_FAILED}: files.get ${res.status} for ${fileName}`);
+    const data = await res.json();
+    if (!data.parents || !data.parents.includes(DRIVE_FOLDER_ID)) {
+      throw new Error(`${ERR.DRIVE_VERIFY_FAILED}: ${fileName} (${fileId}) not in expected folder`);
+    }
+    log(`Verified ${fileName} (${fileId}) in Drive folder`);
+    return fileId;
+  }
+
   async function uploadOrUpdateFile(filePath, fileName) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -1106,7 +1207,7 @@ async function upload(name, sessionFile, dailyFile) {
         const boundary = '-------314159265358979323846';
         const delimiter = `\r\n--${boundary}\r\n`;
         const closeDelimiter = `\r\n--${boundary}--`;
-        
+
         const metadataObj = { name: fileName };
         if (!existingId) {
             // Only set parents when creating a new file
@@ -1129,7 +1230,7 @@ async function upload(name, sessionFile, dailyFile) {
         const url = existingId
           ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&supportsAllDrives=true&fields=id`
           : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id`;
-          
+
         const method = existingId ? 'PATCH' : 'POST';
 
         const res = await nodeFetch(url, {
@@ -1141,15 +1242,17 @@ async function upload(name, sessionFile, dailyFile) {
             },
             body,
         });
-        
+
         const data = await res.json();
         if (!data.id) {
           const errStr = JSON.stringify(data);
-          let code = 'DRIVE_UPLOAD_FAILED';
-          if (errStr.includes('storageQuotaExceeded')) code = 'DRIVE_QUOTA_EXCEEDED';
+          let code = ERR.DRIVE_UPLOAD_FAILED;
+          if (errStr.includes('storageQuotaExceeded')) code = ERR.DRIVE_QUOTA_EXCEEDED;
+          if (res.status === 429) code = ERR.DRIVE_RATE_LIMITED;
           throw new Error(`${code}: ${errStr}`);
         }
         log(existingId ? `Replaced existing file ${fileName} → ${data.id}` : `Created new file ${fileName} → ${data.id}`);
+        await verifyFileInFolder(data.id, fileName);
         return data.id;
       } catch (e) {
         log(`Upload attempt ${attempt} failed for ${fileName}: ${e.message}`);
@@ -1170,8 +1273,9 @@ async function upload(name, sessionFile, dailyFile) {
 
   // We overwrite the existing file so it doesn't clutter the drive.
   // The filename stays identical, but the content updates.
-  await uploadOrUpdateFile(sessionFile, sessionName);
-  await uploadOrUpdateFile(dailyFile,   dailyName);
+  const sessionFileId = await uploadOrUpdateFile(sessionFile, sessionName);
+  const dailyFileId   = await uploadOrUpdateFile(dailyFile,   dailyName);
+  return { sessionFileId, dailyFileId };
 }
 
 // -------------------- WAIT FOR USER --------------------
@@ -1208,12 +1312,16 @@ async function runGenerateAndUpload(cfg, source) {
 
     let sessionFile, dailyFile;
     try {
-      ({ sessionFile, dailyFile } = generateReports());
+      ({ sessionFile, dailyFile } = await generateReports());
     } catch (e) {
-      const code = (e.message.includes('empty') || e.message.includes('invalid JSON'))
-        ? 'NO_DATA' : 'CCUSAGE_FAILED';
-      await sendPing(cfg.name, 'FAILURE', `${code}: ${e.message}`);
-      log(`Generate failed: ${e.message}`);
+      const msg = e.message || '';
+      let code = ERR.CCUSAGE_FAILED;
+      if (msg.startsWith(ERR.CCUSAGE_TIMEOUT))       code = ERR.CCUSAGE_TIMEOUT;
+      else if (msg.startsWith(ERR.CCUSAGE_NOT_FOUND)) code = ERR.CCUSAGE_NOT_FOUND;
+      else if (msg.startsWith(ERR.CCUSAGE_EMPTY_OUTPUT) || msg.startsWith(ERR.NO_DATA) || msg.includes('empty')) code = ERR.NO_DATA;
+      else if (msg.startsWith(ERR.CCUSAGE_INVALID_JSON) || msg.includes('invalid JSON')) code = ERR.CCUSAGE_INVALID_JSON;
+      await sendPing(cfg.name, 'FAILURE', `${code}: ${msg}`);
+      log(`Generate failed [${code}]: ${msg}`);
       return;
     }
 
@@ -1227,16 +1335,19 @@ async function runGenerateAndUpload(cfg, source) {
     await sendPing(cfg.name, 'GENERATE_DONE', `sessions:${sessionCount} daily:${dailyCount}`);
 
     await sendPing(cfg.name, 'UPLOAD_START', 'Uploading to Drive');
+    let uploadedFileIds = {};
     try {
       await validateDrive();
-      await upload(cfg.name, sessionFile, dailyFile);
+      uploadedFileIds = await upload(cfg.name, sessionFile, dailyFile);
     } catch (e) {
       const msg = e.message || '';
-      let code = 'DRIVE_UPLOAD_FAILED';
+      let code = ERR.DRIVE_UPLOAD_FAILED;
       let shouldRetry = true;
-      if (msg.includes('unauthorized_client') || msg.includes('invalid_grant')) { code = 'DRIVE_AUTH_FAILED'; shouldRetry = false; }
-      else if (msg.includes('quota'))                                            { code = 'DRIVE_QUOTA_EXCEEDED'; shouldRetry = false; }
-      else if (msg.includes('Missing Google') || msg.includes('service account')) { code = 'CREDENTIALS_MISSING'; shouldRetry = false; }
+      if (msg.includes('unauthorized_client') || msg.includes('invalid_grant')) { code = ERR.DRIVE_AUTH_FAILED; shouldRetry = false; }
+      else if (msg.startsWith(ERR.DRIVE_QUOTA_EXCEEDED) || msg.includes('quota'))    { code = ERR.DRIVE_QUOTA_EXCEEDED; shouldRetry = false; }
+      else if (msg.startsWith(ERR.DRIVE_RATE_LIMITED))                               { code = ERR.DRIVE_RATE_LIMITED; shouldRetry = true; }
+      else if (msg.startsWith(ERR.AUTH_KEY_MISSING) || msg.includes('Missing Google') || msg.includes('service account')) { code = ERR.CREDENTIALS_MISSING; shouldRetry = false; }
+      else if (msg.startsWith(ERR.DRIVE_VERIFY_FAILED))                              { code = ERR.DRIVE_VERIFY_FAILED; shouldRetry = false; }
 
       if (shouldRetry) {
         try {
@@ -1262,7 +1373,10 @@ async function runGenerateAndUpload(cfg, source) {
     else if (source === 'force') msg = `Force-run for week of ${weekOf}`;
     else                          msg = `Scheduled upload for week of ${weekOf}`;
 
-    const successResult = await sendPing(cfg.name, 'SUCCESS', msg);
+    const successResult = await sendPing(cfg.name, 'SUCCESS', msg, {
+      sessionFileId: uploadedFileIds.sessionFileId || null,
+      dailyFileId:   uploadedFileIds.dailyFileId   || null,
+    });
 
     // Drive upload succeeded; commit lastUploadWeek if the SUCCESS ping was acked
     // OR durably queued for replay. Only skip commit when both ping and queue write failed.
@@ -1274,7 +1388,7 @@ async function runGenerateAndUpload(cfg, source) {
     }
   } catch (e) {
     log(`runGenerateAndUpload unexpected error: ${e.message}`);
-    await sendPing(cfg.name, 'FAILURE', `UNKNOWN_ERROR: ${e.message}`);
+    await sendPing(cfg.name, 'FAILURE', `${ERR.UNKNOWN_ERROR}: ${e.message}`);
   }
 }
 
@@ -1330,6 +1444,7 @@ async function serviceLoop(cfg) {
   let isRunning = false;
   let isPausedState = false;
   let currentUploadFrequency = 'weekly';
+  let lastHeartbeatSentAt = Date.now();
 
   log(`Service loop started v${VERSION} — polling every ${POLL_INTERVAL_MS / 1000}s (pid=${process.pid})`);
 
@@ -1342,6 +1457,7 @@ async function serviceLoop(cfg) {
 
   // Send immediate heartbeat on startup
   await sendPing(cfg.name, 'HEARTBEAT', `v${VERSION}`, pingExtra()).catch(() => {});
+  lastHeartbeatSentAt = Date.now();
 
   // Handle --force immediately before entering the loop
   if (FORCE_RUN) {
@@ -1403,8 +1519,21 @@ async function serviceLoop(cfg) {
     try {
       const status = isPausedState ? 'PAUSED' : 'HEARTBEAT';
       await sendPing(cfg.name, status, `v${VERSION}`, pingExtra());
+      lastHeartbeatSentAt = Date.now();
     } catch {}
   }, HEARTBEAT_INTERVAL_MS);
+
+  // --- Watchdog: exit if heartbeat loop stalls for >10 min ---
+  const WATCHDOG_INTERVAL_MS = 2 * 60 * 1000;
+  const WATCHDOG_THRESHOLD_MS = 10 * 60 * 1000;
+  setInterval(() => {
+    const stalledMs = Date.now() - lastHeartbeatSentAt;
+    if (stalledMs > WATCHDOG_THRESHOLD_MS) {
+      log(`${ERR.WATCHDOG_STALL}: no heartbeat for ${Math.round(stalledMs / 60000)}min — restarting`);
+      appendEvent({ kind: 'watchdog-stall', stalledMs });
+      process.exit(1);
+    }
+  }, WATCHDOG_INTERVAL_MS);
 
   // --- Scheduled upload check every hour ---
   setInterval(async () => {
@@ -1560,5 +1689,22 @@ async function main() {
   // Enter persistent service loop
   await serviceLoop(cfg);
 }
+
+// -------------------- GLOBAL ERROR HANDLERS --------------------
+// Best-effort ping before crash so the admin dashboard sees the failure.
+function handleFatalError(type, err) {
+  const msg = err && err.message ? err.message : String(err);
+  log(`${type}: ${msg}`);
+  appendEvent({ kind: type.toLowerCase(), error: msg });
+  // Attempt a best-effort ping; don't await — we're crashing regardless.
+  const cfg = (() => { try { return loadConfig(); } catch { return null; } })();
+  if (cfg && cfg.name) {
+    sendPing(cfg.name, 'FAILURE', `${ERR.UNKNOWN_ERROR}: ${type}: ${msg}`).catch(() => {});
+  }
+  setTimeout(() => process.exit(1), 3000);
+}
+
+process.on('unhandledRejection', (reason) => handleFatalError('UNHANDLED_REJECTION', reason));
+process.on('uncaughtException',  (err)    => handleFatalError('UNCAUGHT_EXCEPTION', err));
 
 main().catch(() => process.exit(1));
