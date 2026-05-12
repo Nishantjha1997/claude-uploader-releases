@@ -535,6 +535,17 @@ function cancelTrigger(name) {
     .adminCancelTrigger(name);
 }
 
+function clearAllTriggers() {
+  if (!confirm('Clear ALL queued triggers? This cannot be undone.')) return;
+  google.script.run
+    .withSuccessHandler(r => {
+      showToast(r.cleared > 0 ? 'Cleared ' + r.cleared + ' trigger(s)' : 'Queue was already empty');
+      fetchData();
+    })
+    .withFailureHandler(err => showToast('Failed: ' + err.message, true))
+    .adminClearAllTriggers();
+}
+
 function togglePause(name, isPaused) {
   showToast((isPaused ? 'Resuming ' : 'Pausing ') + name + '...');
 

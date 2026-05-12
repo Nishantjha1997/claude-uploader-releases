@@ -239,6 +239,7 @@ function checkAndClearTrigger(name) {
       if (String(data[i][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
         var triggerType = data[i][3] ? String(data[i][3]).trim() : 'FORCE_RUN';
         qSheet.deleteRow(i + 1);
+        SpreadsheetApp.flush();  // commit immediately so concurrent readers see it gone
         log_('TriggerQueue: consumed ' + triggerType + ' for ' + name);
         invalidateCache_();
         return { triggered: true, type: triggerType, paused: paused, uploadFrequency: uploadFrequency };
@@ -290,6 +291,31 @@ function adminCancelTrigger(name) {
       }
     }
     return { success: false, error: 'No trigger found for ' + name };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Wipes every queued trigger in one shot. Useful to clear stale rows that were
+// never consumed because the agent was offline when the trigger was issued.
+function adminClearAllTriggers() {
+  requireAdmin_();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName('TriggerQueue');
+    if (!sheet) return { success: true, cleared: 0 };
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return { success: true, cleared: 0 };  // header only
+
+    var numRows = lastRow - 1;
+    sheet.deleteRows(2, numRows);  // delete all data rows in one API call
+    SpreadsheetApp.flush();
+    log_('TriggerQueue: cleared ' + numRows + ' stale trigger(s)');
+    invalidateCache_();
+    return { success: true, cleared: numRows };
   } finally {
     lock.releaseLock();
   }
