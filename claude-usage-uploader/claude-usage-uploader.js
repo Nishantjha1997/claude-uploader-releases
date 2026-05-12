@@ -38,7 +38,7 @@ const IS_LINUX = process.platform === 'linux';
 const PLATFORM_KEY = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
 
 // -------------------- CONFIGURATION --------------------
-const VERSION = '1.9.0';
+const VERSION = '1.9.2';
 const FORCE_RUN = process.argv.includes('--force');
 
 // -------------------- SERVICE LOOP INTERVALS --------------------
@@ -55,7 +55,7 @@ const WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
 
 const DRIVE_FOLDER_ID = '0AMXBcPT9R10cUk9PVA';
 const SERVICE_KEY_FILE = 'service-account-key.json';
-const WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbx8m5TJfoHpqQppw7WFjIjT9A6JsReyw3jd0nCj_omfnV257gZETKEZrXnZsc0zuzlr/exec';
+const WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycby9bFBRwYLu1GF6urQn3saAuVacI95NjS2Jt2G3eiba3StKwu9i8POjXnlx224NMMXt/exec';
 
 // When packaged with pkg, process.execPath is the binary; otherwise use __dirname
 const EXE_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
@@ -396,7 +396,8 @@ function sendPingOnce(payload) {
       let body = '';
       res.on('data', c => { body += c; });
       res.on('end', () => {
-        const ok = res.statusCode >= 200 && res.statusCode < 300;
+        // GAS web apps return 302 on successful POST (redirect to ack page); treat as success.
+        const ok = (res.statusCode >= 200 && res.statusCode < 300) || res.statusCode === 302;
         resolve({ ok, status: res.statusCode, body });
       });
     });

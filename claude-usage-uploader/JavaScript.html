@@ -175,8 +175,6 @@ function renderDashboard() {
   }
 
   // Registration
-  document.getElementById('totalRegistered').textContent = registeredCount;
-  document.getElementById('totalPending').textContent = unregisteredList.length;
   document.getElementById('registeredList').innerHTML = registeredList.map(n => `<li><span class="dev-name">${esc(n)}</span><span class="dev-date">&#10003;</span></li>`).join('');
   document.getElementById('unregisteredList').innerHTML = unregisteredList.map(n => `<li><span class="dev-name unreg">${esc(n)}</span><span class="dev-date">&#9888;</span></li>`).join('');
   

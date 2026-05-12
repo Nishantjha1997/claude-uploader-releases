@@ -197,32 +197,51 @@ function adminQueuePing(name) {
 
 function checkAndClearTrigger(name) {
   if (!name) return { triggered: false, paused: false };
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Lock-free reads: pause state and settings are safe to read outside a lock.
+  var paused = isDeveloperPaused_(ss, name);
+  var uploadFrequency = getSetting_('uploadFrequency', 'weekly');
+
+  // --- FAST PATH (no lock) ---
+  // Read the queue speculatively. If the developer has no entry we're done — 99% of calls
+  // take this branch and never touch the global lock at all.
+  var qSheet = ss.getSheetByName('TriggerQueue');
+  if (!qSheet) return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
+
+  var quickData = qSheet.getDataRange().getValues();
+  var candidateFound = false;
+  for (var k = 1; k < quickData.length; k++) {
+    if (String(quickData[k][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
+      candidateFound = true;
+      break;
+    }
+  }
+  if (!candidateFound) {
+    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
+  }
+
+  // --- SAFE PATH (exclusive lock) ---
+  // A row was spotted; acquire the lock and re-read before mutating so concurrent requests
+  // cannot double-consume the same trigger entry.
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) {
+  if (!lock.tryLock(15000)) {
     log_('checkAndClearTrigger: lock timeout for ' + name);
-    return { triggered: false, paused: false };
+    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
   }
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-
-    // Check pause state
-    var paused = isDeveloperPaused_(ss, name);
-    var uploadFrequency = getSetting_('uploadFrequency', 'weekly');
-
-    var base = { paused: paused, uploadFrequency: uploadFrequency };
-
-    var sheet = ss.getSheetByName('TriggerQueue');
-    if (!sheet) return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
-
-    var data = sheet.getDataRange().getValues();
+    var data = qSheet.getDataRange().getValues();
     for (var i = 1; i < data.length; i++) {
       if (String(data[i][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
         var triggerType = data[i][3] ? String(data[i][3]).trim() : 'FORCE_RUN';
-        sheet.deleteRow(i + 1);
+        qSheet.deleteRow(i + 1);
         log_('TriggerQueue: consumed ' + triggerType + ' for ' + name);
+        invalidateCache_();
         return { triggered: true, type: triggerType, paused: paused, uploadFrequency: uploadFrequency };
       }
     }
+    // Trigger was claimed by a concurrent request between the fast-check and lock acquisition.
     return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
   } finally {
     lock.releaseLock();
