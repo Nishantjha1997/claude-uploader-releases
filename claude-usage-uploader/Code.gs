@@ -5,7 +5,7 @@
 
 // -------------------- WEBHOOK AUTH --------------------
 var WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
-var HMAC_STALE_SECS = 3600;  // tolerate up to 1 hour of system clock drift
+var HMAC_STALE_SECS = 7200;  // tolerate up to 2 hours of system clock drift
 
 function computeHmac256_(secret, message) {
   var raw = Utilities.computeHmacSha256Signature(message, secret);
@@ -45,7 +45,7 @@ var STATUS = {
 };
 
 // Status types considered "noise" — routed to HeartbeatLog instead of ComplianceLog.
-var NOISE_STATUSES = [STATUS.HEARTBEAT, STATUS.WAITING, STATUS.PONG, STATUS.POLLING_ACK, STATUS.PAUSED, STATUS.WAITING_PAUSED];
+var NOISE_STATUSES = [STATUS.HEARTBEAT, STATUS.WAITING, STATUS.PONG, STATUS.PAUSED, STATUS.WAITING_PAUSED];
 
 // -------------------- ADMIN ACCESS CONTROL --------------------
 // Add admin emails here. Empty array means "no allowlist" — anyone with web app access can mutate.
@@ -160,6 +160,43 @@ function adminQueueTrigger(name, type) {
     log_('TriggerQueue: queued ' + type + ' for ' + name + ' by ' + who);
     invalidateCache_();
     return { success: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Bulk-queue FORCE_RUN for multiple developers in one lock acquisition.
+// Skips names already in the queue. Returns { queued: [], skipped: [] }.
+function adminQueueTriggerBatch(names) {
+  requireAdmin_();
+  if (!names || !names.length) return { queued: [], skipped: [] };
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheet = ensureTriggerQueue();
+    var data = sheet.getDataRange().getValues();
+    var alreadyQueued = {};
+    for (var i = 1; i < data.length; i++) {
+      if (data[i][0]) alreadyQueued[String(data[i][0]).trim().toLowerCase()] = true;
+    }
+    var who = '';
+    try { who = Session.getActiveUser().getEmail(); } catch (e) { who = 'admin'; }
+    var queued = [], skipped = [], now = new Date().toISOString();
+    names.forEach(function(name) {
+      var key = String(name).trim().toLowerCase();
+      if (alreadyQueued[key]) {
+        skipped.push(name);
+      } else {
+        sheet.appendRow([name.trim(), now, who, 'FORCE_RUN']);
+        queued.push(name);
+        alreadyQueued[key] = true;
+      }
+    });
+    if (queued.length > 0) {
+      log_('TriggerQueue: batch queued ' + queued.length + ' FORCE_RUN(s) by ' + who);
+      invalidateCache_();
+    }
+    return { queued: queued, skipped: skipped };
   } finally {
     lock.releaseLock();
   }
@@ -632,6 +669,20 @@ function doPost(e) {
     var lastUpdateCheck = payload.lastUpdateCheck || '';
 
     var ss    = SpreadsheetApp.getActiveSpreadsheet();
+
+    // Auto-register: add the developer to ExpectedDevelopers if not already there.
+    // Any genuine uploader ping is enough evidence that this is a real developer.
+    if (name && name !== 'UNKNOWN') {
+      ensureExpectedDevelopersSheet();
+      var expSheet = ss.getSheetByName('ExpectedDevelopers');
+      var expData = expSheet.getDataRange().getValues();
+      var alreadyExpected = false;
+      for (var ei = 1; ei < expData.length; ei++) {
+        if (String(expData[ei][0]).trim().toLowerCase() === name.trim().toLowerCase()) { alreadyExpected = true; break; }
+      }
+      if (!alreadyExpected) { expSheet.appendRow([name.trim()]); log_('Auto-registered: ' + name); invalidateCache_(); }
+    }
+
     var isNoise = NOISE_STATUSES.indexOf(status) !== -1;
     var sheetName = isNoise ? 'HeartbeatLog' : 'ComplianceLog';
     var sheet = ss.getSheetByName(sheetName);
@@ -786,6 +837,41 @@ function removeExpectedDeveloper(name) {
       }
     }
     return { success: false, error: name + ' not found' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Bulk-add all active developers (anyone who has ever sent a ping) to ExpectedDevelopers.
+// Useful for seeding the roster from historical log data. Returns { added: [] }.
+function adminSyncActiveToExpected() {
+  requireAdmin_();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    ensureExpectedDevelopersSheet();
+    var expSheet = ss.getSheetByName('ExpectedDevelopers');
+    var expData = expSheet.getDataRange().getValues();
+    var existing = {};
+    for (var i = 1; i < expData.length; i++) {
+      if (expData[i][0]) existing[String(expData[i][0]).trim().toLowerCase()] = true;
+    }
+    var added = [];
+    getActiveUsers().forEach(function(u) {
+      if (!u.name) return;
+      var key = u.name.trim().toLowerCase();
+      if (!existing[key]) {
+        expSheet.appendRow([u.name.trim()]);
+        existing[key] = true;
+        added.push(u.name.trim());
+      }
+    });
+    if (added.length > 0) {
+      log_('adminSyncActiveToExpected: added ' + added.length + ' developer(s): ' + added.join(', '));
+      invalidateCache_();
+    }
+    return { added: added };
   } finally {
     lock.releaseLock();
   }

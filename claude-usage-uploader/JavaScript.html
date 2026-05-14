@@ -272,6 +272,7 @@ function renderComplianceGrid() {
       <td style="font-weight:500">${esc(d.name)}</td>
       <td>${getBadgeHtml(d.status)}</td>
       <td><span style="font-size:11px;color:var(--t3)">${timeSince(au ? au.lastSeen : null)}</span></td>
+      <td><span style="font-size:11px;color:var(--t3)">${timeSince(au ? au.lastUpload : null)}</span></td>
     </tr>`;
   }).join('');
 }
@@ -453,6 +454,24 @@ function addDeveloper() {
     .addExpectedDeveloper(val);
 }
 
+function syncActiveToExpected() {
+  const btn = document.getElementById('syncActiveBtn');
+  btn.disabled = true; btn.textContent = 'Syncing...';
+  google.script.run
+    .withSuccessHandler(function(r) {
+      btn.disabled = false; btn.textContent = '⇄ Sync Active Devs';
+      showToast(r.added.length > 0
+        ? 'Synced ' + r.added.length + ' developer(s) to expected list'
+        : 'All active developers already in expected list');
+      if (r.added.length > 0) fetchData();
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false; btn.textContent = '⇄ Sync Active Devs';
+      showToast('Sync failed: ' + err.message, true);
+    })
+    .adminSyncActiveToExpected();
+}
+
 let devToDelete = null;
 function confirmDeleteDev(name) {
   devToDelete = name;
@@ -501,6 +520,47 @@ function queueForceRun() {
       showToast('Failed: ' + err.message, true);
     })
     .adminQueueTrigger(name, 'FORCE_RUN');
+}
+
+function runAll() {
+  const btn = document.getElementById('runAllBtn');
+  btn.disabled = true; btn.textContent = 'Queueing...';
+  const names = (dashboardData.expectedDevelopers || []).slice();
+  if (!names.length) { showToast('No expected developers found', true); btn.disabled = false; btn.textContent = '▶▶ Run All'; return; }
+  google.script.run
+    .withSuccessHandler(function(r) {
+      btn.disabled = false; btn.textContent = '▶▶ Run All';
+      const msg = 'Queued ' + r.queued.length + ' run(s)' + (r.skipped.length ? ' (' + r.skipped.length + ' already pending)' : '');
+      showToast(msg);
+      fetchData();
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false; btn.textContent = '▶▶ Run All';
+      showToast('Failed: ' + err.message, true);
+    })
+    .adminQueueTriggerBatch(names);
+}
+
+function runOnline() {
+  const btn = document.getElementById('runOnlineBtn');
+  btn.disabled = true; btn.textContent = 'Queueing...';
+  const now = new Date();
+  const names = (dashboardData.activeUsers || [])
+    .filter(function(u) { return u.lastSeen && (now - new Date(u.lastSeen)) / 60000 < 60; })
+    .map(function(u) { return u.name; });
+  if (!names.length) { showToast('No online developers (seen in last 60m)', true); btn.disabled = false; btn.textContent = '🟢 Run Online'; return; }
+  google.script.run
+    .withSuccessHandler(function(r) {
+      btn.disabled = false; btn.textContent = '🟢 Run Online';
+      const msg = 'Queued ' + r.queued.length + ' run(s)' + (r.skipped.length ? ' (' + r.skipped.length + ' already pending)' : '');
+      showToast(msg);
+      fetchData();
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false; btn.textContent = '🟢 Run Online';
+      showToast('Failed: ' + err.message, true);
+    })
+    .adminQueueTriggerBatch(names);
 }
 
 function queueForceRunUser(name) {
@@ -900,6 +960,34 @@ function renderHealthKpis() {
     <div class="kpi-card"><div class="kpi-val ${stalledCls}">${stalled}</div><div class="kpi-label">Stalled</div></div>
     <div class="kpi-card"><div class="kpi-val sv-cyan">${triggerQueue.length}</div><div class="kpi-label">Pending Ops</div></div>
   `;
+  // Populate frequency selector from server data
+  const freqSel = document.getElementById('uploadFreqSelect');
+  if (freqSel && dashboardData.uploadFrequency) freqSel.value = dashboardData.uploadFrequency;
+}
+
+function saveUploadFrequency() {
+  const sel = document.getElementById('uploadFreqSelect');
+  const btn = document.getElementById('saveFreqBtn');
+  const res = document.getElementById('saveFreqResult');
+  const freq = sel.value;
+  btn.disabled = true; btn.textContent = 'Saving...'; res.textContent = '';
+  google.script.run
+    .withSuccessHandler(function(r) {
+      btn.disabled = false; btn.textContent = 'Save';
+      if (r.success) {
+        res.textContent = '';
+        showToast('Upload frequency set to ' + freq);
+        fetchData();
+      } else {
+        res.textContent = r.error || 'Error';
+        showToast('Error: ' + (r.error || 'Unknown'), true);
+      }
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false; btn.textContent = 'Save';
+      showToast('Failed: ' + err.message, true);
+    })
+    .setUploadFrequency(freq);
 }
 
 function renderDevRoster() {

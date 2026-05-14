@@ -153,7 +153,7 @@
           </div>
           <div class="table-wrap">
             <table class="data-table" id="complianceTable">
-              <thead><tr><th>Name</th><th>Status</th><th>Last Ping</th></tr></thead>
+              <thead><tr><th>Name</th><th>Status</th><th>Last Ping</th><th>Last Upload</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -221,6 +221,8 @@
           <div class="admin-form" style="margin-bottom:16px">
             <select id="adminNameSelect"><option value="">— select developer —</option></select>
             <button class="btn btn-primary" onclick="queueForceRun()" id="adminRunBtn">Queue Force Run</button>
+            <button class="btn btn-ghost btn-sm" onclick="runAll()" id="runAllBtn">&#9654;&#9654; Run All</button>
+            <button class="btn btn-ghost btn-sm" onclick="runOnline()" id="runOnlineBtn">&#128994; Run Online</button>
             <span id="adminRunResult" style="font-size:13px;color:var(--t3)"></span>
           </div>
         </div>
@@ -259,6 +261,7 @@
                 <div class="card-subtitle">Add or remove developers from the expected roster</div>
               </div>
             </div>
+            <button class="btn btn-ghost btn-sm" onclick="syncActiveToExpected()" id="syncActiveBtn">&#8644; Sync Active Devs</button>
             <button class="btn btn-ghost btn-sm" onclick="loadExpectedDevelopers()">&#8635; Reload</button>
           </div>
           <div class="manage-add">
@@ -301,6 +304,28 @@
       <!-- ==================== SYSTEM HEALTH PAGE ==================== -->
       <div class="page-view" id="page-health">
         <div class="kpi-strip" id="healthKpis"></div>
+
+        <!-- Upload Frequency -->
+        <div class="card">
+          <div class="card-hd">
+            <div class="card-hd-left">
+              <div class="card-icon ci-indigo">&#128337;</div>
+              <div>
+                <div class="card-title">Upload Frequency</div>
+                <div class="card-subtitle">How often developers are expected to upload usage data</div>
+              </div>
+            </div>
+          </div>
+          <div class="admin-form">
+            <select id="uploadFreqSelect">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="saveUploadFrequency()" id="saveFreqBtn">Save</button>
+            <span id="saveFreqResult" style="font-size:13px;color:var(--t3)"></span>
+          </div>
+        </div>
 
         <!-- Test Webhook -->
         <div class="card">
