@@ -7,16 +7,26 @@ function esc(s) {
   return d.innerHTML;
 }
 let expandState = {};
+let pendingExpand = [];
+let completedRefresh = {};
+let lockedOrder = null;
 let countdownInterval;
 let refreshTimer;
 let refreshCountdown = 30;
 let progressInterval = null;
 let currentPage = 'overview';
+// Global queue status tracking
+let gqsIntervalId = null;
+let gqsBatchTotal = 0; // set by runAll/runOnline when a batch is kicked off
+let gqsBatchSucceeded = 0;
+let gqsBatchFailed = 0;
+let gqsBatchStartedAt = null;
 
 const pageTitles = {
   overview: 'Overview',
   compliance: 'Compliance',
   developers: 'Developers',
+  versions: 'Version Matrix',
   queue: 'Queue & Runs',
   roster: 'Registration',
   health: 'System Health'
@@ -35,9 +45,22 @@ function navigateTo(page) {
 }
 
 function renderPageData(page) {
-  if (page === 'overview') renderOverviewKpis();
-  if (page === 'roster') renderRosterKpis();
-  if (page === 'health') renderHealthKpis();
+  if (page === 'overview')    renderOverviewKpis();
+  if (page === 'compliance')  renderCompliancePage();
+  if (page === 'versions')    renderVersionMatrix();
+  if (page === 'roster')      renderRosterKpis();
+  if (page === 'health')      renderHealthKpis();
+  if (page === 'queue') {
+    renderQueuePage();
+    if (!queuePageInterval) {
+      queuePageInterval = setInterval(function() {
+        if (currentPage === 'queue') renderQueuePage();
+        else { clearInterval(queuePageInterval); queuePageInterval = null; }
+      }, 3000);
+    }
+  } else {
+    clearInterval(queuePageInterval); queuePageInterval = null;
+  }
 }
 
 function isPaused() {
@@ -71,16 +94,32 @@ function getBadgeHtml(status) {
   return `<span class="badge b-grey">${esc(status)}</span>`;
 }
 
+// Single source of truth for "is this user online right now?"
+// Used by the KPI counter, Live Presence table, and runOnline() — all three must agree.
+function isOnline(u) {
+  if (!u) return false;
+  const lb = u.lastHeartbeat ? new Date(u.lastHeartbeat).getTime() : 0;
+  const ls = u.lastSeen      ? new Date(u.lastSeen).getTime()      : 0;
+  const lp = u.lastPong      ? new Date(u.lastPong).getTime()      : 0;
+  const recent = Math.max(lb, ls, lp);
+  return recent > 0 && (Date.now() - recent) / 60000 < 10;
+}
+
+function formatAbsoluteDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
 function getStatusDotHtml(user) {
   if (user.paused) return '<span class="status-dot dot-offline" style="background:var(--amber)" title="User is paused"></span> Paused';
-  if (user.pendingTrigger) return '<span class="status-dot dot-waiting" title="Trigger queued"></span>';
-  const lb = user.lastHeartbeat ? new Date(user.lastHeartbeat) : 0;
-  const ls = user.lastSeen ? new Date(user.lastSeen) : 0;
-  const lp = user.lastPong ? new Date(user.lastPong) : 0;
-  const recent = new Date(Math.max(lb, ls, lp));
-  if (!recent.getTime()) return '<span class="status-dot dot-stalled" title="STALLED — never seen"></span> <b style="color:var(--red)">Stalled</b>';
-  const minAgo = (new Date() - recent) / 60000;
-  if (minAgo < 10)   return '<span class="status-dot dot-online"  title="Online (<10m ago)"></span> Online';
+  if (user.pendingTrigger) return '<span class="status-dot dot-waiting" title="Trigger queued"></span> Queued';
+  if (!user.lastSeen && !user.lastHeartbeat && !user.lastPong)
+    return '<span class="status-dot dot-stalled" title="STALLED — never seen"></span> <b style="color:var(--red)">Stalled</b>';
+  if (isOnline(user)) return '<span class="status-dot dot-online" title="Online (<10m ago)"></span> Online';
+  const minAgo = user.lastSeen ? (Date.now() - new Date(user.lastSeen).getTime()) / 60000 : Infinity;
   if (minAgo < 60)   return '<span class="status-dot dot-away"    title="Away (10–60m ago)"></span> Away';
   if (minAgo < 1440) return '<span class="status-dot dot-offline" title="Offline (1h–24h ago)"></span> Offline';
   return '<span class="status-dot dot-stalled" title="STALLED — no heartbeat for >24h"></span> <b style="color:var(--red)">Stalled</b>';
@@ -105,6 +144,7 @@ function fetchData() {
     } catch(e) {
       showToast('Render error: ' + e.message, true);
       document.getElementById('loading').style.display = 'none';
+      document.getElementById('appShell').style.display = 'flex';
       rb.disabled = false; rb.classList.remove('loading'); rb.innerHTML = '&#8635; Refresh';
     }
   }).withFailureHandler(function(err) {
@@ -124,8 +164,13 @@ function renderDashboard() {
   const registeredCount = registeredNames.length;
   const registeredList = registeredNames;
   const unregisteredList = expectedDevelopers.filter(n => !registeredNames.includes(n));
-  const adminTriggers = triggerQueue.map(t => ({ devName: t.name, timestamp: t.queuedAt, user: t.queuedBy, type: t.type }));
-  const adminUsers = expectedDevelopers;
+  const adminTriggers = triggerQueue.map(t => ({ devName: t.name, timestamp: t.queuedAt, notBefore: t.notBefore || '', type: t.type }));
+  // Queue dropdown: registered developers + any active users not yet in registered list
+  const registeredNameSet = new Set(registeredNames);
+  const adminUsers = [...new Set([
+    ...registeredNames,
+    ...(activeUsers || []).map(u => u.name).filter(n => !registeredNameSet.has(n))
+  ])];
 
   // Active Users
   const tb = document.getElementById('activeUsersTbody');
@@ -136,12 +181,28 @@ function renderDashboard() {
   } else {
     document.getElementById('activeUsersTable').style.display = 'table';
     document.getElementById('activeUsersEmpty').style.display = 'none';
-    activeUsers.forEach(u => {
+    // Stabilize sort order when any pipeline row is expanded
+    const hasExpanded = Object.keys(expandState).some(function(k) { return expandState[k]; });
+    let orderedUsers = activeUsers;
+    if (hasExpanded) {
+      if (!lockedOrder) lockedOrder = activeUsers.map(function(u) { return u.name; });
+      const orderMap = {};
+      lockedOrder.forEach(function(name, i) { orderMap[name] = i; });
+      orderedUsers = activeUsers.slice().sort(function(a, b) {
+        const ai = orderMap[a.name] !== undefined ? orderMap[a.name] : 9999;
+        const bi = orderMap[b.name] !== undefined ? orderMap[b.name] : 9999;
+        return ai - bi;
+      });
+    } else {
+      lockedOrder = null;
+    }
+
+    orderedUsers.forEach(function(u) {
       const isExp = expandState[u.name];
       const tr = document.createElement('tr');
       tr.className = 'clickable-row';
       tr.innerHTML = `
-        <td style="font-weight:600">${esc(u.name)}</td>
+        <td style="font-weight:600">${esc(u.name)}${u.version ? `<div style="font-size:10px;font-weight:400;color:var(--t3);margin-top:2px">v${esc(u.version)}</div>` : ''}</td>
         <td><div class="status-cell">${getStatusDotHtml(u)}</div></td>
         <td><div style="font-size:11px">${timeSince(u.lastSeen)}</div></td>
         <td><div style="font-size:11px">${timeSince(u.lastPong)}</div></td>
@@ -163,7 +224,7 @@ function renderDashboard() {
       `;
       tr.onclick = () => toggleRow(u.name);
       tb.appendChild(tr);
-      
+
       const trExt = document.createElement('tr');
       trExt.className = 'prog-row';
       trExt.innerHTML = `<td colspan="6"><div id="prog_${u.name}" class="prog-inner ${isExp?'open':''}"><div class="loader-wrap"><div class="loader-ring"></div></div></div></td>`;
@@ -171,8 +232,18 @@ function renderDashboard() {
     });
 
     // Batch fetch any expanded progress rows
-    const expandedNames = activeUsers.filter(u => expandState[u.name]).map(u => u.name);
+    const expandedNames = orderedUsers.filter(u => expandState[u.name]).map(u => u.name);
     if (expandedNames.length > 0) fetchProgressBatch(expandedNames);
+
+    // Auto-expand any rows queued by runAll/runOnline
+    if (pendingExpand.length > 0) {
+      pendingExpand.forEach(function(name) {
+        if (!expandState[name] && document.getElementById('prog_' + name)) {
+          toggleRow(name);
+        }
+      });
+      pendingExpand = [];
+    }
   }
 
   // Registration logic (KPIs handled in renderOverviewKpis)
@@ -223,8 +294,25 @@ function renderDashboard() {
     document.getElementById('triggerQueueTable').style.display = 'table';
     document.getElementById('triggerQueueEmpty').style.display = 'none';
     adminTriggers.forEach((t) => {
-      qb.innerHTML += `<tr><td>${esc(t.devName)}</td><td>${new Date(t.timestamp).toLocaleString()}</td><td>${esc(t.user)}</td><td><span class="badge b-indigo">${esc(t.type)}</span></td>
-      <td><button class="btn btn-ghost btn-sm js-cancel-trigger" data-name="${esc(t.devName)}">Cancel</button></td></tr>`;
+      var startsIn = '';
+      if (t.notBefore) {
+        var msLeft = new Date(t.notBefore) - new Date();
+        if (msLeft > 0) {
+          var minsLeft = Math.ceil(msLeft / 60000);
+          startsIn = minsLeft + 'm';
+        } else {
+          startsIn = 'Now';
+        }
+      } else {
+        startsIn = 'Now';
+      }
+      qb.innerHTML += `<tr>
+        <td>${esc(t.devName)}</td>
+        <td style="font-size:11px">${t.timestamp ? new Date(t.timestamp).toLocaleString() : ''}</td>
+        <td><span class="badge ${startsIn === 'Now' ? 'b-green' : 'b-amber'}">${esc(startsIn)}</span></td>
+        <td><span class="badge b-indigo">${esc(t.type)}</span></td>
+        <td><button class="btn btn-ghost btn-sm js-cancel-trigger" data-name="${esc(t.devName)}">Cancel</button></td>
+      </tr>`;
     });
   }
 
@@ -234,48 +322,320 @@ function renderDashboard() {
   sel.innerHTML = '<option value="">— select developer —</option>' + adminUsers.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
   if (curSel) sel.value = curSel;
 
-  // Compliance Week Selector
-  const ws = document.getElementById('weekSelector');
-  if (ws.options.length !== weeks.length) {
-    ws.innerHTML = weeks.map(w => `<option value="${esc(w)}">${esc(w)}</option>`).join('');
-  }
-  renderComplianceGrid();
+  // Compliance page
+  renderCompliancePage();
   loadExpectedDevelopers();
+  loadRegisteredDevelopers();
 
   // New page renderers
   renderOverviewKpis();
   renderDevRoster();
   renderRosterKpis();
   renderHealthKpis();
+  renderVersionMatrix();
 }
 
-function renderComplianceGrid() {
-  const ws = document.getElementById('weekSelector');
-  if (!ws.value || !dashboardData.complianceByWeek) return;
-  const wk = ws.value;
-  const stats = dashboardData.complianceByWeek[wk] || { expected:0, reported:0, failed:0, pending:0, details:[] };
-  
-  document.getElementById('compExpected').textContent = stats.expected;
-  document.getElementById('compReported').textContent = stats.reported;
-  document.getElementById('compFailed').textContent = stats.failed;
-  document.getElementById('compPending').textContent = stats.pending;
-  
-  var rate = stats.expected > 0 ? Math.round((stats.reported / stats.expected) * 100) : 0;
-  document.getElementById('compRate').textContent = rate + '%';
-  
+// ==================== COMPLIANCE PAGE RENDERERS ====================
+
+function renderCompliancePage() {
+  renderComplianceSnapshot();
+  renderComplianceHistoryGrid();
+  try { renderStreakLeaderboard(); } catch(e) { console.warn('Streak leaderboard error:', e.message); }
+  renderRecentUploads();
+}
+
+function renderComplianceSnapshot() {
+  const { registeredDevelopers=[], complianceByWeek={}, currentWeek='', activeUsers=[] } = dashboardData;
+  const stats = complianceByWeek[currentWeek] || { reported:0, failed:0, details:[] };
+  const weekDetails = stats.details || [];
+  const registeredCount = registeredDevelopers.length;
+
+  const compliantCount = weekDetails.filter(d =>
+    ['SUCCESS','REPORTED','COMPLIANT'].includes(d.status)
+  ).length;
+  const missingCount = registeredCount - compliantCount;
+  const rate = registeredCount > 0 ? Math.round((compliantCount / registeredCount) * 100) : 0;
+
+  const sub = document.getElementById('compSnapshotSubtitle');
+  if (sub) sub.textContent = currentWeek ? 'Week of ' + currentWeek : 'Weekly compliance snapshot';
+
+  const csReg = document.getElementById('cs-registered');
+  const csComp = document.getElementById('cs-compliant');
+  const csMiss = document.getElementById('cs-missing');
+  const csRate = document.getElementById('cs-rate');
+  if (csReg)  csReg.textContent  = registeredCount;
+  if (csComp) csComp.textContent = compliantCount;
+  if (csMiss) csMiss.textContent = missingCount;
+  if (csRate) csRate.textContent = rate + '%';
+
   const auMap = {};
-  (dashboardData.activeUsers || []).forEach(u => { auMap[u.name] = u; });
-  document.querySelector('#complianceTable tbody').innerHTML = stats.details.map(d => {
-    const au = auMap[d.name];
-    return `
-    <tr>
-      <td style="font-weight:500">${esc(d.name)}</td>
-      <td>${getBadgeHtml(d.status)}</td>
-      <td><span style="font-size:11px;color:var(--t3)">${timeSince(au ? au.lastSeen : null)}</span></td>
-      <td><span style="font-size:11px;color:var(--t3)">${timeSince(au ? au.lastUpload : null)}</span></td>
+  activeUsers.forEach(u => { auMap[u.name] = u; });
+  const detailMap = {};
+  weekDetails.forEach(d => { detailMap[d.name] = d; });
+
+  const tbody = document.getElementById('compSnapshotTbody');
+  if (!tbody) return;
+  tbody.innerHTML = registeredDevelopers.map(r => {
+    const det = detailMap[r.name];
+    const au  = auMap[r.name];
+    const statusHtml = det ? getBadgeHtml(det.status) : '<span class="badge b-grey">No Data</span>';
+    const lastUpload = au && au.lastUpload ? formatAbsoluteDateTime(au.lastUpload) : '—';
+    const version    = au && au.version    ? esc(au.version) : '—';
+    return `<tr>
+      <td style="font-weight:500">${esc(r.name)}</td>
+      <td>${statusHtml}</td>
+      <td style="font-size:12px;color:var(--t2)">${lastUpload}</td>
+      <td style="font-size:12px;color:var(--t3);font-family:'JetBrains Mono',monospace">${version}</td>
     </tr>`;
   }).join('');
 }
+
+function renderComplianceHistoryGrid() {
+  const { weekHeaders=[], complianceGrid={}, registeredDevelopers=[] } = dashboardData;
+  const thead = document.getElementById('compHistoryHead');
+  const tbody = document.getElementById('compHistoryTbody');
+  if (!thead || !tbody) return;
+  if (!weekHeaders.length || !registeredDevelopers.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No history data yet.</td></tr>';
+    return;
+  }
+
+  function fmtWeekLabel(iso) {
+    try {
+      const d = new Date(iso + 'T00:00:00Z');
+      return d.toLocaleDateString(undefined, { month:'short', day:'numeric', timeZone:'UTC' });
+    } catch(e) { return iso; }
+  }
+
+  let headCells = '<th style="position:sticky;left:0;background:var(--bg2);z-index:2;min-width:140px">Developer</th>';
+  weekHeaders.forEach(w => {
+    headCells += `<th style="text-align:center;min-width:72px">${esc(fmtWeekLabel(w))}</th>`;
+  });
+  thead.innerHTML = `<tr>${headCells}</tr>`;
+
+  tbody.innerHTML = registeredDevelopers.map(r => {
+    const devWeeks = complianceGrid[r.name] || {};
+    let cells = `<td style="font-weight:500;position:sticky;left:0;background:var(--bg2);z-index:1">${esc(r.name)}</td>`;
+    weekHeaders.forEach(w => {
+      const s = devWeeks[w];
+      if (s === 'SUCCESS') {
+        cells += `<td style="text-align:center" title="${esc(w)}: SUCCESS"><span style="color:var(--green);font-size:18px">&#10003;</span></td>`;
+      } else if (s === 'FAILURE') {
+        cells += `<td style="text-align:center" title="${esc(w)}: FAILURE"><span style="color:var(--red);font-size:18px">&#10007;</span></td>`;
+      } else {
+        cells += `<td style="text-align:center" title="${esc(w)}: No data"><span style="color:var(--t4);font-size:18px">&middot;</span></td>`;
+      }
+    });
+    return `<tr>${cells}</tr>`;
+  }).join('');
+}
+
+function renderRecentUploads() {
+  const uploads = dashboardData.recentUploads || [];
+  const tbody = document.getElementById('recentUploadsTbody');
+  if (!tbody) return;
+  if (!uploads.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No uploads recorded yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = uploads.map(u => {
+    const badgeCls = u.status === 'SUCCESS' ? 'b-green' : 'b-red';
+    // Show reason/details for FAILURE rows; green checkmark for SUCCESS
+    let reasonHtml = '';
+    if (u.status === 'SUCCESS') {
+      reasonHtml = '<span style="color:var(--green);font-size:12px">&#10003; Upload complete</span>';
+    } else if (u.message) {
+      reasonHtml = `<span style="color:var(--red);font-size:11px;font-family:'JetBrains Mono',monospace;word-break:break-word">${esc(u.message)}</span>`;
+    } else {
+      reasonHtml = '<span style="color:var(--t4);font-size:11px">—</span>';
+    }
+    return `<tr>
+      <td style="font-weight:500">${esc(u.name)}</td>
+      <td style="font-size:12px;color:var(--t2)">${formatAbsoluteDateTime(u.timestamp)}</td>
+      <td style="font-size:12px;color:var(--t3)">${esc(u.weekStart)}</td>
+      <td><span class="badge ${badgeCls}">${esc(u.status)}</span></td>
+      <td style="font-size:12px;color:var(--t3);font-family:'JetBrains Mono',monospace">${u.version ? esc(u.version) : '—'}</td>
+      <td style="max-width:280px">${reasonHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderStreakLeaderboard() {
+  const { weekHeaders=[], complianceGrid={}, registeredDevelopers=[] } = dashboardData;
+  const tbody = document.getElementById('streakLeaderboardTbody');
+  if (!tbody) return;
+  
+  if (!weekHeaders.length || !registeredDevelopers.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No streak data available.</td></tr>';
+    return;
+  }
+  
+  const leaders = registeredDevelopers.map(r => {
+    const devWeeks = complianceGrid[r.name] || {};
+    let streak = 0;
+    for (let i = weekHeaders.length - 1; i >= 0; i--) {
+      const w = weekHeaders[i];
+      if (devWeeks[w] === 'SUCCESS') {
+        streak++;
+      } else {
+        break;
+      }
+    }
+    return { name: r.name, streak: streak };
+  });
+  
+  leaders.sort((a, b) => b.streak - a.streak);
+  
+  tbody.innerHTML = leaders.map((l, index) => {
+    let medal = '';
+    if (index === 0 && l.streak > 0) medal = '🥇 ';
+    else if (index === 1 && l.streak > 0) medal = '🥈 ';
+    else if (index === 2 && l.streak > 0) medal = '🥉 ';
+    
+    let streakBadge = '';
+    if (l.streak >= 4) {
+      streakBadge = `<span class="badge b-green">🔥 ${l.streak} Weeks</span>`;
+    } else if (l.streak > 0) {
+      streakBadge = `<span class="badge b-indigo">${l.streak} Weeks</span>`;
+    } else {
+      streakBadge = `<span class="badge b-grey">0 Weeks</span>`;
+    }
+    
+    return `<tr>
+      <td style="font-weight:700;color:var(--t3)">#${index + 1}</td>
+      <td style="font-weight:600">${medal}${esc(l.name)}</td>
+      <td>${streakBadge}</td>
+      <td>${l.streak > 0 ? '<span style="color:var(--green)">Active Streak</span>' : '<span style="color:var(--t3)">Pending Upload</span>'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ==================== CSV EXPORT ====================
+function exportLogsToCSV() {
+  const btn = document.getElementById('exportLogsBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '&#8987; Exporting...'; }
+  google.script.run
+    .withSuccessHandler(function(csv) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '&#128190; Export Logs'; }
+      if (!csv) { showToast('No log data to export', true); return; }
+      // Trigger browser download
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url  = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const now = new Date();
+      const stamp = now.getFullYear() + '-' +
+        String(now.getMonth()+1).padStart(2,'0') + '-' +
+        String(now.getDate()).padStart(2,'0');
+      a.href = url;
+      a.download = 'compliance_log_' + stamp + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('Export complete \u2014 check your downloads folder');
+    })
+    .withFailureHandler(function(err) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '&#128190; Export Logs'; }
+      showToast('Export failed: ' + err.message, true);
+    })
+    .getComplianceLogCSV();
+}
+
+// ==================== GLOBAL QUEUE STATUS BAR ====================
+// Polls getGlobalQueueStatus() every 8 seconds when a batch is active.
+// A batch is considered active when the queue bar is visible.
+function startGlobalQueuePolling(batchTotal) {
+  if (batchTotal && batchTotal > 0) {
+    gqsBatchTotal    = batchTotal;
+    gqsBatchSucceeded = 0;
+    gqsBatchFailed    = 0;
+    gqsBatchStartedAt = new Date();
+  }
+  const bar = document.getElementById('globalQueueBar');
+  if (bar) bar.style.display = 'block';
+  if (gqsIntervalId) clearInterval(gqsIntervalId);
+  refreshGlobalQueueStatus(); // immediate first fetch
+  gqsIntervalId = setInterval(refreshGlobalQueueStatus, 8000);
+}
+
+function stopGlobalQueuePolling() {
+  if (gqsIntervalId) { clearInterval(gqsIntervalId); gqsIntervalId = null; }
+  const bar = document.getElementById('globalQueueBar');
+  // Keep bar visible for 10s after completion so user can read the final result
+  if (bar) setTimeout(() => { if (gqsIntervalId === null) bar.style.display = 'none'; }, 10000);
+}
+
+function refreshGlobalQueueStatus() {
+  if (isPaused()) return;
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res) return;
+      renderGlobalQueueStatus(res);
+    })
+    .withFailureHandler(function() { /* silent */ })
+    .getGlobalQueueStatus();
+}
+
+function renderGlobalQueueStatus(res) {
+  const bar = document.getElementById('globalQueueBar');
+  if (!bar) return;
+
+  const pending     = res.totalQueued     || 0;
+  const running     = res.inProgressCount || 0;
+  const completed   = res.recentCompleted || [];
+
+  // Update counts from server data
+  const succeeded = completed.filter(r => r.status === 'SUCCESS').length;
+  const failed    = completed.filter(r => r.status === 'FAILURE').length;
+  const doneCount = succeeded + failed;
+
+  // Persist session highs (gqsBatchTotal may grow as smart-retries add more)
+  if (gqsBatchTotal < pending + running + doneCount) {
+    gqsBatchTotal = pending + running + doneCount;
+  }
+  gqsBatchSucceeded = succeeded;
+  gqsBatchFailed    = failed;
+
+  const total = gqsBatchTotal || (pending + running + doneCount) || 1;
+  const progressPct = Math.min(100, Math.round((doneCount / total) * 100));
+
+  // Show/hide bar
+  const isActive = pending > 0 || running > 0;
+  if (!isActive && doneCount === 0) {
+    stopGlobalQueuePolling();
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'block';
+
+  // Update elements
+  document.getElementById('gqsPending').textContent  = pending;
+  document.getElementById('gqsRunning').textContent  = running;
+  document.getElementById('gqsDone').textContent     = succeeded;
+  document.getElementById('gqsFailed').textContent   = failed;
+  document.getElementById('gqsBar').style.width      = progressPct + '%';
+
+  const title = isActive
+    ? `Batch Run \u2014 ${doneCount} of ${total} complete`
+    : `Batch Complete \u2014 ${succeeded} succeeded, ${failed} failed`;
+  document.getElementById('gqsTitle').textContent = title;
+
+  // Details line: in-progress names
+  const inProgressNames = (res.inProgress || []).map(r => r.name);
+  const pendingNames    = (res.pending    || []).map(r => r.name);
+  let detailParts = [];
+  if (inProgressNames.length > 0) detailParts.push('\u25b6 Running: ' + inProgressNames.join(', '));
+  if (pendingNames.length > 0)    detailParts.push('\u23f3 Queued: ' + pendingNames.slice(0,5).join(', ') + (pendingNames.length > 5 ? ' +' + (pendingNames.length-5) + ' more' : ''));
+  if (failed > 0) {
+    const failedNames = completed.filter(r => r.status === 'FAILURE').map(r => r.name);
+    detailParts.push('\u274c Failed: ' + failedNames.join(', '));
+  }
+  document.getElementById('gqsSubtitle').textContent = progressPct + '% complete';
+  document.getElementById('gqsDetails').textContent  = detailParts.join('  \u2502  ');
+
+  if (!isActive) stopGlobalQueuePolling();
+}
+
 
 // Send compliance reminders
 function sendReminders() {
@@ -303,6 +663,7 @@ function toggleRow(name) {
     fetchProgress(name);
   } else {
     el.classList.remove('open');
+    delete completedRefresh[name];
   }
 }
 
@@ -349,6 +710,89 @@ function fetchProgress(name) {
 function renderProgressHtml(name, res) {
   const { hasTrigger, recentLogs, lastNextPollAt } = res;
   const logs = recentLogs || [];
+
+  // --- Dynamic Update Pipeline Visualizer ---
+  let isUpdatePipeline = false;
+  for (let i = 0; i < logs.length; i++) {
+    const s = String(logs[i].status).trim().toUpperCase();
+    if (s === 'UPDATE_START' || s === 'UPDATED') {
+      isUpdatePipeline = true;
+      break;
+    }
+  }
+
+  if (isUpdatePipeline) {
+    let updateState = { ack: false, download: false, done: false, err: false };
+    for (let i = 0; i < logs.length; i++) {
+      const s = String(logs[i].status).trim().toUpperCase();
+      if (s === 'UPDATED') {
+        if (i === 0 && !hasTrigger) {
+          updateState.ack = true; updateState.download = true; updateState.done = true;
+        }
+        break;
+      }
+      if (s === 'ERROR' || s === 'FAILURE') {
+        if (i === 0 && !hasTrigger) {
+          updateState.err = true;
+          updateState.ack = true; updateState.download = true; updateState.done = true;
+        }
+        break;
+      }
+      if (s === 'UPDATE_START') {
+        updateState.ack = true; updateState.download = true;
+      }
+    }
+
+    const isUpdateDone = updateState.done && !hasTrigger;
+    if (isUpdateDone && !completedRefresh[name]) {
+      completedRefresh[name] = true;
+      setTimeout(fetchData, 1500);
+    }
+
+    let html = `
+      <div class="prog-steps">
+        <div class="prog-step">
+          <div class="prog-icon ${hasTrigger && !updateState.ack ? 'spinning' : updateState.ack ? 'active' : ''}">&#8987;</div>
+        </div>
+        <div class="prog-connector"><div class="prog-fill ${updateState.download ? 'done' : ''}"></div></div>
+        
+        <div class="prog-step">
+          <div class="prog-icon ${updateState.download && !updateState.done ? 'spinning' : updateState.done ? 'active' : ''}">&#128187;</div>
+        </div>
+        <div class="prog-connector"><div class="prog-fill ${isUpdateDone ? 'done' : ''}"></div></div>
+        
+        <div class="prog-step">
+          <div class="prog-icon ${updateState.err ? 'error' : isUpdateDone ? 'done' : ''}">${updateState.err ? '&#10006;' : '&#10003;'}</div>
+        </div>
+      </div>
+      
+      <div class="prog-labels">
+        <div class="prog-lbl ${hasTrigger ? 'active' : updateState.ack ? 'done' : ''}">POLLING</div>
+        <div class="prog-lbl ${updateState.download && !updateState.done ? 'active' : updateState.done ? 'done' : ''}">DOWNLOADING</div>
+        <div class="prog-lbl ${updateState.err ? 'error' : isUpdateDone ? 'done' : ''}">${updateState.err ? 'ERROR' : 'COMPLETE'}</div>
+      </div>
+    `;
+
+    let subMsg = '';
+    if (updateState.err) subMsg = `<div class="prog-msg" style="color:var(--red)">Hot-patch failed. Check client logs.</div>`;
+    else if (isUpdateDone) subMsg = `<div class="prog-msg" style="color:var(--green)">Client successfully hot-patched and restarted!</div>`;
+    else if (updateState.download) subMsg = `<div class="prog-msg" style="color:var(--t2)">Downloading new binary and hot-swapping locally...</div>`;
+    else subMsg = `<div class="prog-msg" style="color:var(--t3)">Waiting for client to pick up update trigger...</div>`;
+
+    let logHtml = `<div class="prog-logs">` + logs.slice(0, 5).map(l => {
+      var d = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : '';
+      return `<div class="log-line"><span class="log-ts">[${d}]</span> <span class="badge b-indigo">${esc(l.status)}</span> ${esc(l.message || '')}</div>`;
+    }).join('') + `</div>`;
+
+    // Handle both inline rows and expanded queue page containers
+    var saved = document.getElementById('prog_' + name);
+    var alias = document.getElementById('qprog_' + name);
+    if (saved) saved.innerHTML = html + subMsg + logHtml;
+    if (alias) alias.innerHTML = html + subMsg + logHtml;
+    return;
+  }
+
+  // --- Standard Generate & Upload Pipeline ---
   let state = { ack: false, gen: false, genDone: false, up: false, upDone: false, err: false };
   
   // Scan backwards through recent logs
@@ -368,7 +812,11 @@ function renderProgressHtml(name, res) {
   }
   
   const isDone = state.upDone && !hasTrigger;
-  
+  if (isDone && !completedRefresh[name]) {
+    completedRefresh[name] = true;
+    setTimeout(fetchData, 1500);
+  }
+
   let html = `
     <div class="prog-steps">
       <!-- 1. Polling -->
@@ -413,24 +861,69 @@ function renderProgressHtml(name, res) {
   if (!isDone && lastNextPollAt) {
     cdHtml = `<div class="prog-countdown" id="cd_${name}">Next poll sync...</div>`;
   }
-  
-  document.getElementById('prog_' + name).innerHTML = html + subMsg + cdHtml;
+
+  // Recent activity log
+  let logsHtml = '';
+  if (recentLogs && recentLogs.length > 0) {
+    const rows = recentLogs.slice(0, 12).map(function(l) {
+      const sc = String(l.status).toLowerCase().replace(/[^a-z0-9]/g, '-');
+      return `<tr>
+        <td style="font-size:10px;color:var(--t3);white-space:nowrap">${timeSince(l.timestamp)}</td>
+        <td><span class="badge b-${sc}" style="font-size:10px">${esc(l.status)}</span></td>
+        <td style="font-size:10px;color:var(--t2)">${esc(l.message || '')}</td>
+      </tr>`;
+    }).join('');
+    logsHtml = `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
+      <div style="font-size:10px;font-weight:600;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Activity Log</div>
+      <table style="width:100%;border-collapse:collapse"><tbody>${rows}</tbody></table>
+    </div>`;
+  }
+
+  document.getElementById('prog_' + name).innerHTML = html + subMsg + cdHtml + logsHtml;
   if (cdHtml) startCountdown(name, lastNextPollAt);
 }
 
 // Manage Developers
+// Renders expected-developer chips using data already present in dashboardData.
+// No server round-trip needed — dashboardData.expectedDevelopers is populated by getDashboardData.
 function loadExpectedDevelopers() {
+  var names = (dashboardData.expectedDevelopers || []);
+  document.getElementById('managedDevList').innerHTML = names.map(function(n) {
+    return '<div class="dev-chip">' +
+      '<span style="font-weight:500">' + esc(n) + '</span>' +
+      '<button class="dev-chip-rm js-remove-dev" data-name="' + esc(n) + '" title="Remove">&#10005;</button>' +
+      '</div>';
+  }).join('');
+}
+
+// Renders registered-developer chips using data already present in dashboardData.
+// No server round-trip needed — dashboardData.registeredDevelopers is populated by getDashboardData.
+function loadRegisteredDevelopers() {
+  var el = document.getElementById('registeredDevList');
+  if (!el) return;
+  var devs = (dashboardData.registeredDevelopers || []);
+  el.innerHTML = devs.map(function(r) {
+    return '<div class="dev-chip">' +
+      '<span style="font-weight:500">' + esc(r.name) + '</span>' +
+      '<span style="font-size:10px;color:var(--t3);margin-left:6px">' + (r.registeredAt ? timeSince(r.registeredAt) : '') + '</span>' +
+      '<button class="btn btn-ghost btn-sm js-remove-reg-dev" data-name="' + esc(r.name) + '" title="Remove from registered" style="margin-left:8px;padding:0 6px">&#10005;</button>' +
+      '</div>';
+  }).join('') || '<div style="color:var(--t3);font-size:13px">No registered developers yet.</div>';
+}
+
+function addRegisteredDeveloperManual() {
+  const inp = document.getElementById('newRegDevName');
+  const val = inp.value.trim();
+  if (!val) return;
+  inp.disabled = true;
   google.script.run
-    .withSuccessHandler(res => {
-      document.getElementById('managedDevList').innerHTML = res.map(n => `
-        <div class="dev-chip">
-          <span style="font-weight:500">${esc(n)}</span>
-          <button class="dev-chip-rm js-remove-dev" data-name="${esc(n)}" title="Remove">&#10005;</button>
-        </div>
-      `).join('');
+    .withSuccessHandler(function(res) {
+      inp.disabled = false; inp.value = '';
+      if (res.success) { showToast('Developer registered'); fetchData(); }
+      else showToast('Error: ' + res.error, true);
     })
-    .withFailureHandler(err => showToast('Error: ' + err.message, true))
-    .getExpectedDevelopersList();
+    .withFailureHandler(function(err) { inp.disabled = false; showToast('Failed: ' + err.message, true); })
+    .addRegisteredDeveloper(val);
 }
 
 function addDeveloper() {
@@ -444,7 +937,7 @@ function addDeveloper() {
       inp.value = '';
       if (res.success) {
         showToast('Developer added');
-        loadExpectedDevelopers();
+        fetchData(); // refreshes dashboardData then re-renders chips via renderDashboard
       } else showToast('Error: ' + res.error, true);
     })
     .withFailureHandler(err => {
@@ -492,7 +985,7 @@ document.getElementById('confirmOkBtn').addEventListener('click', () => {
     .withSuccessHandler(res => {
       if (res.success) {
         showToast('Developer removed');
-        loadExpectedDevelopers();
+        fetchData(); // refreshes dashboardData then re-renders chips via renderDashboard
       } else showToast('Error: ' + res.error, true);
     })
     .withFailureHandler(err => showToast('Failed: ' + err.message, true))
@@ -526,16 +1019,21 @@ function runAll() {
   const btn = document.getElementById('runAllBtn');
   btn.disabled = true; btn.textContent = 'Queueing...';
   const names = (dashboardData.expectedDevelopers || []).slice();
-  if (!names.length) { showToast('No expected developers found', true); btn.disabled = false; btn.textContent = '▶▶ Run All'; return; }
+  if (!names.length) { showToast('No expected developers found', true); btn.disabled = false; btn.textContent = '\u25ba\u25ba Run All'; return; }
   google.script.run
     .withSuccessHandler(function(r) {
-      btn.disabled = false; btn.textContent = '▶▶ Run All';
+      btn.disabled = false; btn.textContent = '\u25ba\u25ba Run All';
       const msg = 'Queued ' + r.queued.length + ' run(s)' + (r.skipped.length ? ' (' + r.skipped.length + ' already pending)' : '');
       showToast(msg);
+      if (r.queued.length > 0) {
+        pendingExpand = r.queued.slice();
+        startGlobalQueuePolling(r.queued.length + r.skipped.length);
+        navigateTo('overview');
+      }
       fetchData();
     })
     .withFailureHandler(function(err) {
-      btn.disabled = false; btn.textContent = '▶▶ Run All';
+      btn.disabled = false; btn.textContent = '\u25ba\u25ba Run All';
       showToast('Failed: ' + err.message, true);
     })
     .adminQueueTriggerBatch(names);
@@ -544,20 +1042,22 @@ function runAll() {
 function runOnline() {
   const btn = document.getElementById('runOnlineBtn');
   btn.disabled = true; btn.textContent = 'Queueing...';
-  const now = new Date();
-  const names = (dashboardData.activeUsers || [])
-    .filter(function(u) { return u.lastSeen && (now - new Date(u.lastSeen)) / 60000 < 60; })
-    .map(function(u) { return u.name; });
-  if (!names.length) { showToast('No online developers (seen in last 60m)', true); btn.disabled = false; btn.textContent = '🟢 Run Online'; return; }
+  const names = (dashboardData.activeUsers || []).filter(isOnline).map(function(u) { return u.name; });
+  if (!names.length) { showToast('No online developers (seen in last 10m)', true); btn.disabled = false; btn.textContent = '\U0001f7e2 Run Online'; return; }
   google.script.run
     .withSuccessHandler(function(r) {
-      btn.disabled = false; btn.textContent = '🟢 Run Online';
+      btn.disabled = false; btn.textContent = '\U0001f7e2 Run Online';
       const msg = 'Queued ' + r.queued.length + ' run(s)' + (r.skipped.length ? ' (' + r.skipped.length + ' already pending)' : '');
       showToast(msg);
+      if (r.queued.length > 0) {
+        pendingExpand = r.queued.slice();
+        startGlobalQueuePolling(r.queued.length + r.skipped.length);
+        navigateTo('overview');
+      }
       fetchData();
     })
     .withFailureHandler(function(err) {
-      btn.disabled = false; btn.textContent = '🟢 Run Online';
+      btn.disabled = false; btn.textContent = '\U0001f7e2 Run Online';
       showToast('Failed: ' + err.message, true);
     })
     .adminQueueTriggerBatch(names);
@@ -583,6 +1083,56 @@ function queuePingUser(name) {
     })
     .withFailureHandler(err => showToast('Failed: ' + err.message, true))
     .adminQueuePing(name);
+}
+
+let queuePageInterval = null;
+let lastModifiedTs = 0;
+let lastModifiedInterval = null;
+
+function renderQueuePage() {
+  if (currentPage !== 'queue') { clearInterval(queuePageInterval); queuePageInterval = null; return; }
+  google.script.run
+    .withSuccessHandler(function(data) {
+      const card = document.getElementById('inProgressCard');
+      const tbody = document.getElementById('inProgressTbody');
+      if (!card || !tbody) return;
+      if (!data.inProgress || data.inProgress.length === 0) {
+        card.style.display = 'none';
+        return;
+      }
+      card.style.display = '';
+      tbody.innerHTML = '';
+      data.inProgress.forEach(function(item) {
+        var name = item.name;
+        var tr = document.createElement('tr');
+        tr.innerHTML = `<td style="font-weight:600;vertical-align:top;padding-top:12px">${esc(name)}</td>
+          <td><div id="qprog_${esc(name)}" class="prog-inner open"><div class="loader-wrap"><div class="loader-ring"></div></div></div></td>`;
+        tbody.appendChild(tr);
+        // Immediately render the pipeline data we already have
+        renderProgressForContainer('qprog_' + name, name, item);
+      });
+    })
+    .withFailureHandler(function(err) { /* silent */ })
+    .getQueuePageData();
+}
+
+function renderProgressForContainer(containerId, name, data) {
+  var hasTrigger = data.hasTrigger || false;
+  var recentLogs = data.recentLogs || [];
+  var lastNextPollAt = data.lastNextPollAt || '';
+  // Reuse renderProgressHtml by temporarily pointing prog_ to our container
+  var saved = document.getElementById('prog_' + name);
+  var alias = document.getElementById(containerId);
+  if (!alias) return;
+  // Swap: temporarily give the element the expected id
+  if (alias.id !== 'prog_' + name) {
+    var oldId = alias.id;
+    alias.id = 'prog_' + name;
+    try { renderProgressHtml(name, data); } catch(e) {}
+    alias.id = oldId;
+  } else {
+    renderProgressHtml(name, data);
+  }
 }
 
 function cancelTrigger(name) {
@@ -629,23 +1179,50 @@ function togglePause(name, isPaused) {
 }
 
 function sendTestPing() {
-  const name = document.getElementById('testName').value.trim() || 'Test User';
-  const status = document.getElementById('testStatus').value;
-  const msg = document.getElementById('testMessage').value.trim();
-  const resEl = document.getElementById('testResult');
-  
-  resEl.textContent = 'Sending...';
+  var name = document.getElementById('testName').value.trim();
+  var stat = document.getElementById('testStatus').value;
+  var msg = document.getElementById('testMessage').value.trim();
+  var resEl = document.getElementById('testResult');
+  if (!name) { resEl.textContent = 'Name required'; return; }
+  resEl.textContent = 'Sending...'; resEl.style.color='var(--t3)';
   google.script.run
-    .withSuccessHandler(r => {
+    .withSuccessHandler(function(r) {
       if (r.result === 'ok') { resEl.textContent = 'Success'; resEl.style.color='var(--green)'; fetchData(); }
       else { resEl.textContent = 'Failed'; resEl.style.color='var(--red)'; }
       setTimeout(() => resEl.textContent='', 3000);
     })
-    .withFailureHandler(err => {
-      resEl.textContent = 'Error'; resEl.style.color='var(--red)';
-      showToast('Failed: ' + err.message, true);
+    .withFailureHandler(function(e) {
+      resEl.textContent = 'Error: ' + e.message; resEl.style.color='var(--red)';
+      setTimeout(() => resEl.textContent='', 3000);
     })
-    .simulatePing(name, status, msg);
+    .simulatePing(name, stat, msg);
+}
+
+function forcePruneLogs() {
+  var btn = document.getElementById('pruneBtn');
+  var resEl = document.getElementById('pruneResult');
+  btn.disabled = true;
+  resEl.textContent = 'Pruning and compacting sheets... this may take a minute...';
+  resEl.style.color = 'var(--t3)';
+  
+  google.script.run
+    .withSuccessHandler(function(r) {
+      btn.disabled = false;
+      if (r.success) {
+        resEl.textContent = 'Pruning complete! Sheets compacted successfully.';
+        resEl.style.color = 'var(--green)';
+      } else {
+        resEl.textContent = 'Error: ' + r.error;
+        resEl.style.color = 'var(--red)';
+      }
+      setTimeout(() => resEl.textContent='', 5000);
+    })
+    .withFailureHandler(function(e) {
+      btn.disabled = false;
+      resEl.textContent = 'Failed: ' + e.message;
+      resEl.style.color = 'var(--red)';
+    })
+    .adminForcePrune();
 }
 
 // Logs Modal
@@ -730,7 +1307,7 @@ function setLogFilter(f) {
 
 // Auto-refresh
 function resetAutoRefresh() {
-  refreshCountdown = 30;
+  refreshCountdown = (currentPage === 'compliance') ? 10 : 30;
   updateBadge();
   clearInterval(countdownInterval);
   clearTimeout(refreshTimer);
@@ -753,7 +1330,24 @@ function resetAutoRefresh() {
       if (isPaused()) return;
       const expanded = Object.keys(expandState).filter(n => expandState[n]);
       if (expanded.length > 0) fetchProgressBatch(expanded);
-    }, 3000);
+    }, 4000);  // 4s — reduced from 1.5s to cut spreadsheet read pressure
+  }
+
+  if (!lastModifiedInterval) {
+    lastModifiedInterval = setInterval(function() {
+      if (isPaused()) return;
+      google.script.run
+        .withSuccessHandler(function(r) {
+          if (!r || !r.ts) return;
+          if (lastModifiedTs === 0) {
+            lastModifiedTs = r.ts;
+          } else if (r.ts > lastModifiedTs) {
+            lastModifiedTs = r.ts;
+            fetchData();
+          }
+        })
+        .getLastModified();
+    }, 10000);  // 10s — reduced from 5s to cut concurrent GAS invocations
   }
 }
 
@@ -783,6 +1377,16 @@ document.addEventListener('click', function(e) {
     togglePause(name, isPaused);
   } else if (btn.classList.contains('js-remove-dev')) {
     confirmDeleteDev(name);
+  } else if (btn.classList.contains('js-remove-reg-dev')) {
+    if (confirm('Remove ' + name + ' from registered developers? They will no longer be tracked for compliance.')) {
+      google.script.run
+        .withSuccessHandler(function(r) {
+          if (r.success) { showToast('Removed from registered'); fetchData(); }
+          else showToast('Error: ' + (r.error || 'Unknown'), true);
+        })
+        .withFailureHandler(function(err) { showToast('Failed: ' + err.message, true); })
+        .removeRegisteredDeveloper(name);
+    }
   }
 });
 
@@ -826,37 +1430,37 @@ function toggleRegList(wrapId, toggleId) {
 // ===================== NEW RENDERERS =====================
 
 function renderOverviewKpis() {
-  const { expectedDevelopers=[], registeredDevelopers=[], activeUsers=[], triggerQueue=[], complianceByWeek={}, currentWeek='' } = dashboardData;
-  const registeredNames = registeredDevelopers.map(r => r.name);
-  const unregisteredList = expectedDevelopers.filter(n => !registeredNames.includes(n));
-  const onlineCount = activeUsers.filter(u => {
-    const lb = u.lastHeartbeat ? new Date(u.lastHeartbeat) : 0;
-    const ls = u.lastSeen ? new Date(u.lastSeen) : 0;
-    const lp = u.lastPong ? new Date(u.lastPong) : 0;
-    const recent = new Date(Math.max(lb, ls, lp));
-    return recent.getTime() && (new Date() - recent) / 60000 < 10;
+  const { registeredDevelopers=[], activeUsers=[], triggerQueue=[], complianceByWeek={}, currentWeek='' } = dashboardData;
+  const onlineCount = activeUsers.filter(isOnline).length;
+  const registeredCount = registeredDevelopers.length;
+
+  const stats = complianceByWeek[currentWeek] || { reported:0, failed:0, details:[] };
+  const weekDetails = stats.details || [];
+  const rate = registeredCount > 0 ? Math.round((stats.reported / registeredCount) * 100) : 0;
+
+  // Count registered devs who haven't uploaded this week
+  const notUploaded = registeredDevelopers.filter(r => {
+    const d = weekDetails.find(x => x.name === r.name);
+    return !d || !['SUCCESS', 'REPORTED', 'COMPLIANT'].includes(d.status);
   }).length;
 
-  const stats = complianceByWeek[currentWeek] || { expected:0, reported:0, failed:0, pending:0 };
-  const rate = stats.expected > 0 ? Math.round((stats.reported / stats.expected) * 100) : 0;
-
+  // KPI order: Online Now first (most real-time), then compliance stats
   document.getElementById('overviewKpis').innerHTML = `
-    <div class="kpi-card"><div class="kpi-val sv-indigo">${stats.expected}</div><div class="kpi-label">Expected This Week</div></div>
+    <div class="kpi-card"><div class="kpi-val" style="color:var(--green)">${onlineCount}</div><div class="kpi-label">Online Now</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-indigo">${registeredCount}</div><div class="kpi-label">Registered Devs</div></div>
     <div class="kpi-card"><div class="kpi-val sv-green">${stats.reported}</div><div class="kpi-label">Uploaded</div></div>
-    <div class="kpi-card"><div class="kpi-val sv-amber">${stats.pending}</div><div class="kpi-label">Pending</div></div>
+    <div class="kpi-card"><div class="kpi-val sv-amber">${notUploaded}</div><div class="kpi-label">Pending</div></div>
     <div class="kpi-card"><div class="kpi-val sv-red">${stats.failed}</div><div class="kpi-label">Failed</div></div>
     <div class="kpi-card"><div class="kpi-val sv-cyan">${rate}%</div><div class="kpi-label">Compliance</div></div>
-    <div class="kpi-card"><div class="kpi-val" style="color:var(--green)">${onlineCount}</div><div class="kpi-label">Online Now</div></div>
     <div class="kpi-card"><div class="kpi-val" style="color:var(--purple)">${triggerQueue.length}</div><div class="kpi-label">Queued Runs</div></div>
   `;
 
-  // Alert Rail
+  // Alert Rail — meaningful signals only
   var alerts = [];
-  if (stats.pending > 0) alerts.push({ cls: 'alert-warn', text: stats.pending + ' developers pending this week' });
-  if (stats.failed > 0) alerts.push({ cls: 'alert-crit', text: stats.failed + ' upload failures detected' });
-  if (unregisteredList.length > 0) alerts.push({ cls: 'alert-warn', text: unregisteredList.length + ' developers not yet registered' });
-  if (triggerQueue.length > 0) alerts.push({ cls: 'alert-info', text: triggerQueue.length + ' force runs queued' });
-  if (rate === 100) alerts.push({ cls: 'alert-ok', text: 'Full compliance achieved this week' });
+  if (notUploaded > 0) alerts.push({ cls: 'alert-warn', text: notUploaded + ' registered dev' + (notUploaded === 1 ? '' : 's') + ' haven\'t uploaded this week' });
+  if (stats.failed > 0) alerts.push({ cls: 'alert-crit', text: stats.failed + ' upload failure' + (stats.failed === 1 ? '' : 's') + ' detected' });
+  if (triggerQueue.length > 0) alerts.push({ cls: 'alert-info', text: triggerQueue.length + ' force run' + (triggerQueue.length === 1 ? '' : 's') + ' queued' });
+  if (rate === 100 && registeredCount > 0) alerts.push({ cls: 'alert-ok', text: 'Full compliance achieved this week' });
 
   document.getElementById('alertRail').innerHTML = alerts.map(a =>
     `<div class="alert-chip ${a.cls}">${a.text}</div>`
@@ -1040,6 +1644,124 @@ document.getElementById('globalSearch').addEventListener('input', function(e) {
   });
 });
 
+
+// ==================== VERSION MATRIX PAGE RENDERERS ====================
+const LATEST_VERSION = '2.0.1';
+
+function compareVersions(v1, v2) {
+  const parts1 = v1.replace(/^v/, '').split('.').map(Number);
+  const parts2 = v2.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+    const p1 = parts1[i] || 0;
+    const p2 = parts2[i] || 0;
+    if (p1 > p2) return 1;
+    if (p1 < p2) return -1;
+  }
+  return 0;
+}
+
+function renderVersionMatrix() {
+  const { activeUsers=[] } = dashboardData;
+  const grid = document.getElementById('versionMatrixGrid');
+  if (!grid) return;
+  
+  if (!activeUsers || activeUsers.length === 0) {
+    grid.innerHTML = '<div class="empty-state">No active users found.</div>';
+    return;
+  }
+  
+  // Sort users alphabetically
+  const sorted = activeUsers.slice().sort((a,b) => a.name.localeCompare(b.name));
+  
+  grid.innerHTML = sorted.map(u => {
+    const ver = u.version || '1.9.0';
+    const isUpToDate = compareVersions(ver, LATEST_VERSION) >= 0;
+    const badgeClass = isUpToDate ? 'version-badge-green' : 'version-badge-orange';
+    const badgeText = isUpToDate ? 'v' + ver + ' (Secure)' : 'v' + ver + ' (Outdated)';
+    
+    let btnHtml = isUpToDate 
+      ? '<button class="btn btn-ghost btn-sm" disabled>Up to date</button>'
+      : '<button class="btn btn-primary btn-sm hotpatch-btn" onclick="forceHotPatch(this, \'' + esc(u.name) + '\')">&#9881; Force Hot-Patch</button>';
+      
+    return `
+      <div class="vm-card">
+        <div style="font-weight:600; font-size:15px; margin-bottom:8px">${esc(u.name)}</div>
+        <div style="margin-bottom:12px">
+          ${getStatusDotHtml(u)}
+        </div>
+        <div class="version-badge ${badgeClass}" style="margin-bottom:12px">
+          ${badgeText}
+        </div>
+        ${btnHtml}
+      </div>
+    `;
+  }).join('');
+}
+
+function forceHotPatch(btn, name) {
+  // Safe argument shifting for old/new signatures
+  if (name === undefined) {
+    name = btn;
+    btn = null;
+    if (typeof event !== 'undefined' && event) {
+      btn = event.target || event.srcElement;
+      if (btn && btn.tagName !== 'BUTTON') {
+        btn = btn.closest('button');
+      }
+    }
+  }
+
+  if (!confirm('Force an immediate hot-patch update for ' + name + '?')) return;
+  
+  const origText = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.innerHTML = '&#8987; Queuing...';
+    btn.disabled = true;
+  }
+  
+  google.script.run
+    .withSuccessHandler(function(res) {
+      showToast('Hot-patch queued for ' + name);
+      if (btn) {
+        btn.innerHTML = '&#10003; Queued';
+      }
+      setTimeout(function() { fetchData(); }, 1500);
+    })
+    .withFailureHandler(function(err) {
+      showToast('Failed to queue hot-patch: ' + err.message, true);
+      if (btn) {
+        btn.innerHTML = origText;
+        btn.disabled = false;
+      }
+    })
+    .forceSendUpdateTrigger(name);
+}
+
+// Theme Switcher Logic
+function changeTheme(theme) {
+  if (theme === 'default') {
+    document.body.removeAttribute('data-theme');
+  } else {
+    document.body.setAttribute('data-theme', theme);
+  }
+  localStorage.setItem('dashboard-theme', theme);
+  // Update active state on pill buttons
+  document.querySelectorAll('.theme-pill').forEach(function(btn) {
+    btn.classList.toggle('active', btn.getAttribute('data-theme') === theme);
+  });
+}
+
+// Auto-restore saved theme before first paint
+(function() {
+  var saved = localStorage.getItem('dashboard-theme') || 'default';
+  if (saved !== 'default') document.body.setAttribute('data-theme', saved);
+  // Pill active state is set after DOM ready in window.onload → re-apply
+  window.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.theme-pill').forEach(function(btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-theme') === saved);
+    });
+  });
+})();
+
 window.onload = fetchData;
 </script>
-

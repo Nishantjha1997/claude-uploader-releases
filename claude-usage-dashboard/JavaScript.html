@@ -1,0 +1,1415 @@
+<script>
+/* 🚀 standalone Claude Usage Analytics & ROI Dashboard — JavaScript.html */
+
+// Global Configuration Constants
+const LICENSE_COST_MONTHLY = 20.00; // Flat monthly fee in USD per user license
+
+// Global Dashboard Data Payload
+let dashboardPayload = null;
+let currentLeaderboardSort = { colIdx: 3, desc: true }; // Sort by Cost descending by default
+let currentProjectSort = { colIdx: 3, desc: true }; // Sort by Cost descending by default
+
+// Page titles & navigation map
+const pageTitles = {
+  'dashboard': 'Executive Summary',
+  'leaderboard': 'Developer Leaderboard',
+  'projects': 'Project Analytics',
+  'optimization': 'License Optimization',
+  'export': 'Reports & Export',
+  'methodology': 'Score Methodology'
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  setupNavigation();
+  loadDashboardData(false);
+});
+
+/**
+ * Handles sidebar navigation page-switches
+ */
+function setupNavigation() {
+  const navItems = document.querySelectorAll('.nav-item');
+  navItems.forEach(item => {
+    item.addEventListener('click', () => {
+      const pageId = item.getAttribute('data-page');
+      
+      // Update sidebar nav state
+      navItems.forEach(nav => nav.classList.remove('active'));
+      item.classList.add('active');
+      
+      // Update active page view
+      const pages = document.querySelectorAll('.dashboard-page');
+      pages.forEach(p => p.classList.remove('active'));
+      document.getElementById(`page-${pageId}`).classList.add('active');
+      
+      // Update header titles
+      document.getElementById('page-title').innerText = pageTitles[pageId] || 'Dashboard';
+      
+      // Redraw charts on tab click to ensure responsiveness
+      if (pageId === 'dashboard') {
+        renderAllCharts();
+      }
+      if (pageId === 'export') {
+        loadWebhookUrl();
+      }
+    });
+  });
+}
+
+/**
+ * Loads the dashboard dataset from Google Apps Script backend
+ */
+function loadDashboardData(forceSync) {
+  setLoadingState(true);
+  
+  if (forceSync) {
+    document.getElementById('refresh-icon').classList.add('spinning');
+  }
+
+  google.script.run
+    .withSuccessHandler(payload => {
+      document.getElementById('refresh-icon').classList.remove('spinning');
+      setLoadingState(false);
+      
+      if (payload.error) {
+        showErrorToast('Failed to parse Drive reports: ' + payload.message);
+        return;
+      }
+      
+      dashboardPayload = payload;
+      populateDashboardViews();
+    })
+    .withFailureHandler(err => {
+      document.getElementById('refresh-icon').classList.remove('spinning');
+      setLoadingState(false);
+      showErrorToast('Server connection failed: ' + err.toString());
+    })
+    .getDashboardData(forceSync);
+}
+
+/**
+ * Controls loading skeleton overlay visibility
+ */
+function setLoadingState(isLoading) {
+  const overlay = document.getElementById('loading-overlay');
+  if (isLoading) {
+    overlay.classList.remove('hidden');
+  } else {
+    overlay.classList.add('hidden');
+  }
+}
+
+/**
+ * Formats date from YYYY-MM-DD to readable format
+ */
+function formatReadableDate(dateStr) {
+  if (!dateStr || dateStr === 'N/A') return 'N/A';
+  try {
+    const parts = dateStr.split('-');
+    if (parts.length === 3) {
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const year = parts[0];
+      const month = months[parseInt(parts[1], 10) - 1] || 'Jan';
+      const day = parseInt(parts[2], 10);
+      return `${month} ${day}, ${year}`;
+    }
+    return dateStr;
+  } catch (e) {
+    return dateStr;
+  }
+}
+
+/**
+ * Maps raw model IDs to short, elegant aliases to prevent legend clutter
+ */
+function cleanModelName(modelId) {
+  if (!modelId) return 'Other';
+  const name = modelId.toLowerCase();
+  
+  // Extract name and version
+  let family = 'Other';
+  if (name.includes('sonnet')) family = 'Sonnet';
+  else if (name.includes('opus')) family = 'Opus';
+  else if (name.includes('haiku')) family = 'Haiku';
+  
+  // Try to find version patterns like "4-6", "4-7", "4-5"
+  const versionMatch = name.match(/(\d+)-(\d+)/);
+  if (versionMatch) {
+    const major = versionMatch[1];
+    const minor = versionMatch[2];
+    return `${family} ${major}.${minor}`;
+  }
+  
+  // Fallback cleaner mapping
+  let clean = modelId.replace(/^claude-/i, '');
+  clean = clean.split('-')[0];
+  return family !== 'Other' ? family : clean.charAt(0).toUpperCase() + clean.slice(1);
+}
+
+/**
+ * Formats currency in USD
+ */
+function formatCurrency(val) {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
+}
+
+/**
+ * Formats token counts nicely (e.g. 1.2M, 450K)
+ */
+function formatNumberAbbr(num) {
+  if (num >= 1000000000) {
+    return (num / 1000000000).toFixed(1) + 'B';
+  }
+  if (num >= 1000000) {
+    return (num / 1000000).toFixed(1) + 'M';
+  }
+  if (num >= 1000) {
+    return (num / 1000).toFixed(1) + 'K';
+  }
+  return num.toString();
+}
+
+/**
+ * Triggers full manual Drive refresh
+ */
+function triggerManualSync() {
+  loadDashboardData(true);
+}
+
+/**
+ * Animates a numeric counter from 0 to endVal using easeOutQuart
+ */
+function animateCounter(el, endVal, formatter, duration) {
+  duration = duration || 1200;
+  const start = performance.now();
+  function step(now) {
+    const p = Math.min((now - start) / duration, 1);
+    const ease = 1 - Math.pow(1 - p, 4);
+    el.innerText = formatter(endVal * ease);
+    if (p < 1) requestAnimationFrame(step);
+    else el.innerText = formatter(endVal);
+  }
+  requestAnimationFrame(step);
+}
+
+/**
+ * Populates all views on data load
+ */
+function populateDashboardViews() {
+  if (!dashboardPayload) return;
+
+  const summary = dashboardPayload.orgSummary;
+  const LICENSE_COST_MONTHLY = summary.licenseMonthlyFee || 20;
+
+  // Format period strings
+  const fromDate = formatReadableDate(summary.reportPeriod.from);
+  const toDate = formatReadableDate(summary.reportPeriod.to);
+  const genDate = formatReadableDate(summary.generatedTime.substring(0, 10));
+  document.getElementById('page-subtitle').innerText = `Report Period: ${fromDate} to ${toDate} | Generated: ${genDate}`;
+
+  // Populate Executive Summary KPIs with count-up animation
+  const licenseCount = summary.totalLicenses;
+  animateCounter(document.getElementById('kpi-total-cost'), summary.totalCodeCost, formatCurrency, 1400);
+  animateCounter(document.getElementById('kpi-subscription-spend'), summary.flatSubscriptionSpend || 0, formatCurrency, 1200);
+  animateCounter(document.getElementById('kpi-potential-savings'), summary.potentialSavings || 0, formatCurrency, 1000);
+
+  // ROI Index card
+  const roiEl = document.getElementById('kpi-roi-index');
+  if (roiEl) {
+    const roiVal = summary.flatSubscriptionSpend > 0 ? (summary.totalCodeCost / summary.flatSubscriptionSpend) : 0;
+    animateCounter(roiEl, roiVal, v => v.toFixed(2) + 'x', 1300);
+  }
+
+  // Active devs counter (integer, no currency)
+  const activeDevsEl = document.getElementById('kpi-active-devs');
+  animateCounter(activeDevsEl, summary.activeUsersCount, v => `${Math.round(v)} / ${licenseCount}`, 1100);
+
+  document.getElementById('kpi-utilization-rate').innerText = `Utilization Rate: ${summary.licenseUtilization}%`;
+
+  // Show org-level warning alert if wasted seats > 0
+  const alertBanner = document.getElementById('org-action-alert');
+  if (summary.potentialSavings > 0) {
+    alertBanner.style.display = 'flex';
+    document.getElementById('org-action-alert-text').innerText = 
+      `Reclamation Alert: ${Math.round(summary.potentialSavings / LICENSE_COST_MONTHLY)} inactive license(s) detected. Reclaiming these can save ${formatCurrency(summary.potentialSavings)}/month (${formatCurrency(summary.potentialSavings * 12)}/year). Review details in License Optimization.`;
+  } else {
+    alertBanner.style.display = 'none';
+  }
+
+  // Populate tables and render SVG charts
+  renderLeaderboardTable();
+  renderProjectTable();
+  renderOptimizationTable();
+  renderAllCharts();
+  initRoiSimulator();
+  renderAdoptionTips();
+}
+
+/**
+ * Draws a 7-day sparkline SVG for a given daily history array
+ */
+function drawSparkline(history) {
+  if (!history || history.length < 2) return '<span style="color:var(--text-muted)">—</span>';
+  const last7 = history.slice(-7);
+  const w = 56, h = 22;
+  const maxC = Math.max(...last7.map(h => h.cost), 0.001);
+  const pts = last7.map((d, i) => {
+    const x = (i / (last7.length - 1)) * (w - 4) + 2;
+    const y = h - 2 - ((d.cost / maxC) * (h - 6));
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const lastVal = last7[last7.length - 1].cost;
+  const firstVal = last7[0].cost;
+  const trendColor = lastVal >= firstVal * 1.05 ? 'var(--accent-danger)' : (lastVal <= firstVal * 0.95 ? 'var(--accent-success)' : 'var(--accent-warning)');
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="display:block"><polyline points="${pts}" fill="none" stroke="${trendColor}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+/**
+ * Renders the primary Developer Leaderboard Table
+ */
+function renderLeaderboardTable() {
+  const tbody = document.getElementById('leaderboard-table-body');
+  tbody.innerHTML = '';
+  
+  if (!dashboardPayload || !dashboardPayload.users) return;
+
+  // Sorting
+  const sortedUsers = [...dashboardPayload.users].sort((a, b) => {
+    let valA, valB;
+    switch (currentLeaderboardSort.colIdx) {
+      case 0: valA = a.name; valB = b.name; break;
+      case 1: valA = a.category; valB = b.category; break;
+      case 2: valA = a.valueScore; valB = b.valueScore; break;
+      case 3: valA = a.totalCost; valB = b.totalCost; break;
+      case 4: valA = a.activeDays; valB = b.activeDays; break;
+      case 5: valA = a.distinctProjects; valB = b.distinctProjects; break;
+      case 6: valA = a.cacheHitRate; valB = b.cacheHitRate; break;
+      case 7: valA = a.lastActivity; valB = b.lastActivity; break;
+      default: valA = a.totalCost; valB = b.totalCost;
+    }
+    
+    if (typeof valA === 'string') {
+      return currentLeaderboardSort.desc ? valB.localeCompare(valA) : valA.localeCompare(valB);
+    }
+    return currentLeaderboardSort.desc ? valB - valA : valA - valB;
+  });
+
+  sortedUsers.forEach(user => {
+    const tr = document.createElement('tr');
+    tr.setAttribute('data-name', user.name.toLowerCase());
+    tr.setAttribute('data-category', getCategoryCode(user.category));
+    
+    const initials = user.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
+    const catClass = getCategoryClass(user.category);
+    
+    tr.innerHTML = `
+      <td>
+        <div class="dev-cell">
+          <div class="avatar">${initials}</div>
+          <div class="dev-meta">
+            <span class="dev-name">${user.name}</span>
+            <span class="dev-email">${user.email}</span>
+          </div>
+        </div>
+      </td>
+      <td><span class="pill ${catClass}">${user.category.substring(2)}</span></td>
+      <td style="text-align: right; font-weight: 700; color: #fff;">${user.valueScore}</td>
+      <td style="text-align: right; font-weight: 600; color: var(--accent-primary);">${formatCurrency(user.totalCost)}</td>
+      <td style="text-align: right;">${user.activeDays}</td>
+      <td style="text-align: right;">${user.distinctProjects}</td>
+      <td>
+        <div class="progress-cell">
+          <span class="progress-pct" style="color:${user.cacheHitRate >= 80 ? 'var(--accent-success)' : user.cacheHitRate >= 40 ? 'var(--accent-warning)' : 'var(--accent-danger)'}">${user.cacheHitRate.toFixed(0)}%</span>
+          <div class="progress-wrap"><div class="progress-fill ${user.cacheHitRate >= 80 ? 'high' : user.cacheHitRate >= 40 ? 'medium' : 'low'}" style="width:${Math.min(100, user.cacheHitRate).toFixed(1)}%"></div></div>
+        </div>
+      </td>
+      <td>${formatReadableDate(user.lastActivity)}</td>
+      <td style="padding: 0.5rem 1.25rem;">${drawSparkline(user.dailyHistory)}</td>
+      <td>
+        <button class="export-btn" style="padding: 0.4rem 0.75rem; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-glass);" onclick="openUserDetailModal('${user.name}')">
+          <i class="fa-solid fa-expand"></i> View
+        </button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  
+  filterLeaderboardTable();
+}
+
+/**
+ * Sorting logic for Leaderboard Table
+ */
+function sortLeaderboardTable(colIdx) {
+  if (currentLeaderboardSort.colIdx === colIdx) {
+    currentLeaderboardSort.desc = !currentLeaderboardSort.desc;
+  } else {
+    currentLeaderboardSort.colIdx = colIdx;
+    currentLeaderboardSort.desc = true;
+  }
+  
+  // Update UI arrows
+  const headers = document.querySelectorAll('#page-leaderboard th');
+  headers.forEach((h, idx) => {
+    h.querySelector('i').className = 'fa-solid fa-sort';
+    if (idx === colIdx) {
+      h.querySelector('i').className = currentLeaderboardSort.desc ? 'fa-solid fa-sort-down' : 'fa-solid fa-sort-up';
+    }
+  });
+
+  renderLeaderboardTable();
+}
+
+function getCategoryClass(cat) {
+  if (cat.includes('Power')) return 'power';
+  if (cat.includes('Chat-Only')) return 'chat';
+  if (cat.includes('Code-Only')) return 'code';
+  if (cat.includes('Low')) return 'low';
+  return 'inactive';
+}
+
+function getCategoryCode(cat) {
+  if (cat.includes('Power')) return 'POWER';
+  if (cat.includes('Chat-Only')) return 'CHAT';
+  if (cat.includes('Code-Only')) return 'CODE';
+  if (cat.includes('Low')) return 'LOW';
+  return 'INACTIVE';
+}
+
+/**
+ * Renders the Project Analytics Table
+ */
+function renderProjectTable() {
+  const tbody = document.getElementById('projects-table-body');
+  tbody.innerHTML = '';
+
+  if (!dashboardPayload || !dashboardPayload.projects) return;
+
+  const sortedProj = [...dashboardPayload.projects].sort((a, b) => {
+    let valA, valB;
+    switch (currentProjectSort.colIdx) {
+      case 0: valA = a.name; valB = b.name; break;
+      case 1: valA = a.devCount; valB = b.devCount; break;
+      case 2: valA = a.sessions; valB = b.sessions; break;
+      case 3: valA = a.totalCost; valB = b.totalCost; break;
+      case 4: valA = a.totalTokens; valB = b.totalTokens; break;
+      case 5: valA = a.lastActivity; valB = b.lastActivity; break;
+      default: valA = a.totalCost; valB = b.totalCost;
+    }
+
+    if (typeof valA === 'string') {
+      return currentProjectSort.desc ? valB.localeCompare(valA) : valA.localeCompare(valB);
+    }
+    return currentProjectSort.desc ? valB - valA : valA - valB;
+  });
+
+  sortedProj.forEach(p => {
+    const tr = document.createElement('tr');
+    tr.setAttribute('data-name', p.name.toLowerCase());
+    const escapedName = p.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    tr.innerHTML = `
+      <td style="font-weight: 600; color: var(--text-primary);"><i class="fa-solid fa-code-branch" style="color: var(--accent-success); margin-right: 0.5rem;"></i> ${p.name}</td>
+      <td style="text-align: right;">
+        <button onclick="openProjectDevsModal('${escapedName}')" title="View contributors" style="background: rgba(37,99,235,0.12); border: 1px solid rgba(37,99,235,0.3); color: var(--accent-primary); border-radius: 12px; padding: 0.2rem 0.65rem; cursor: pointer; font-size: 0.78rem; font-weight: 700; transition: background 0.2s;" onmouseover="this.style.background='rgba(37,99,235,0.25)'" onmouseout="this.style.background='rgba(37,99,235,0.12)'">${p.devCount} <i class="fa-solid fa-user-group" style="font-size:0.6rem;opacity:0.8;"></i></button>
+      </td>
+      <td style="text-align: right;">${p.sessions}</td>
+      <td style="text-align: right; font-weight: 600; color: var(--accent-primary);">${formatCurrency(p.totalCost)}</td>
+      <td style="text-align: right;">${formatNumberAbbr(p.totalTokens)}</td>
+      <td>${formatReadableDate(p.lastActivity)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  
+  filterProjectTable();
+}
+
+/**
+ * Sorting for Project Table
+ */
+function sortProjectTable(colIdx) {
+  if (currentProjectSort.colIdx === colIdx) {
+    currentProjectSort.desc = !currentProjectSort.desc;
+  } else {
+    currentProjectSort.colIdx = colIdx;
+    currentProjectSort.desc = true;
+  }
+
+  const headers = document.querySelectorAll('#page-projects th');
+  headers.forEach((h, idx) => {
+    h.querySelector('i').className = 'fa-solid fa-sort';
+    if (idx === colIdx) {
+      h.querySelector('i').className = currentProjectSort.desc ? 'fa-solid fa-sort-down' : 'fa-solid fa-sort-up';
+    }
+  });
+
+  renderProjectTable();
+}
+
+/**
+ * Renders License Optimization recommendations
+ */
+function renderOptimizationTable() {
+  renderAdoptionTips();
+  const tbody = document.getElementById('optimization-table-body');
+  tbody.innerHTML = '';
+
+  if (!dashboardPayload || !dashboardPayload.users) return;
+
+  const candidates = dashboardPayload.users.filter(u => 
+    u.category.includes('Truly Inactive') || u.category.includes('Low Engagement')
+  );
+
+  document.getElementById('kpi-wasted-licenses').innerText = candidates.length;
+  document.getElementById('kpi-annual-savings').innerText = formatCurrency(candidates.length * LICENSE_COST_MONTHLY * 12);
+
+  if (candidates.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--accent-success); padding: 2rem; font-weight: 600;"><i class="fa-solid fa-circle-check"></i> Great job! No wasted or inactive licenses detected on this team.</td></tr>`;
+    return;
+  }
+
+  candidates.forEach(user => {
+    const tr = document.createElement('tr');
+    const catClass = getCategoryClass(user.category);
+    
+    // Safety guard logic check
+    const isProtected = user.totalCost >= 10.00 || user.activeDays >= 3;
+    const safetyPill = isProtected 
+      ? `<span class="pill success" style="padding: 0.25rem 0.5rem; font-size: 0.7rem;"><i class="fa-solid fa-shield"></i> Protected</span>`
+      : `<span class="pill inactive" style="padding: 0.25rem 0.5rem; font-size: 0.7rem;"><i class="fa-solid fa-circle-minus"></i> Unprotected</span>`;
+
+    const initials = user.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
+    
+    tr.innerHTML = `
+      <td>
+        <div class="dev-cell">
+          <div class="avatar">${initials}</div>
+          <div class="dev-meta">
+            <span class="dev-name">${user.name}</span>
+            <span class="dev-email">${user.email}</span>
+          </div>
+        </div>
+      </td>
+      <td><span class="pill ${catClass}">${user.category.substring(2)}</span></td>
+      <td style="text-align: right;">${user.activeDays}</td>
+      <td style="text-align: right; font-weight: 600;">${formatCurrency(user.totalCost)}</td>
+      <td style="text-align: right; font-weight: 700; color: #fff;">${user.valueScore}</td>
+      <td>${formatReadableDate(user.lastActivity)}</td>
+      <td>${safetyPill}</td>
+      <td style="font-weight: 600; color: ${isProtected ? 'var(--text-muted)' : 'var(--accent-danger)'};">${isProtected ? 'N/A' : (user.category.includes('Truly') ? '99% High' : '80% Medium')}</td>
+      <td>
+        <span style="font-weight: 600; color: ${isProtected ? 'var(--text-secondary)' : 'var(--accent-danger)'};">
+          ${isProtected ? 'Keep (Protected)' : (user.category.includes('Truly') ? 'Reclaim License' : 'Recommend Training')}
+        </span>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+/**
+ * Dynamic filtering for tables
+ */
+function filterLeaderboardTable() {
+  const query = document.getElementById('leaderboard-search').value.toLowerCase();
+  const categoryFilter = document.getElementById('leaderboard-filter-category').value;
+  const rows = document.querySelectorAll('#leaderboard-table-body tr');
+
+  rows.forEach(row => {
+    const name = row.getAttribute('data-name');
+    const cat = row.getAttribute('data-category');
+    const matchesSearch = name.includes(query);
+    const matchesCat = categoryFilter === 'ALL' || cat === categoryFilter;
+
+    if (matchesSearch && matchesCat) {
+      row.style.display = 'table-row';
+    } else {
+      row.style.display = 'none';
+    }
+  });
+}
+
+function filterProjectTable() {
+  const query = document.getElementById('project-search').value.toLowerCase();
+  const rows = document.querySelectorAll('#projects-table-body tr');
+
+  rows.forEach(row => {
+    const name = row.getAttribute('data-name');
+    if (name.includes(query)) {
+      row.style.display = 'table-row';
+    } else {
+      row.style.display = 'none';
+    }
+  });
+}
+
+/**
+ * 📊 Responsive SVGs Drawing Engine
+ */
+function renderAllCharts() {
+  if (!dashboardPayload) return;
+
+  drawOrgCostChart();
+  drawOrgModelDonut();
+  drawOrgTopSpenders();
+  drawOrgTopProjects();
+}
+
+/**
+ * Area cost line chart over time
+ */
+function drawOrgCostChart() {
+  const container = document.getElementById('org-cost-chart');
+  container.innerHTML = '';
+  
+  const series = dashboardPayload.dailyTimeSeries || [];
+  if (series.length === 0) {
+    container.innerHTML = `<p style="color: var(--text-muted);">No daily usage coordinates found.</p>`;
+    return;
+  }
+
+  // Dimension setup — wider left padding so Y labels never clip
+  const width = container.clientWidth || 600;
+  const height = 320;
+  const paddingLeft = 72;   // enough room for "$123.45"
+  const paddingRight = 16;
+  const paddingTop = 24;
+  const paddingBottom = 44;
+  const graphWidth = width - paddingLeft - paddingRight;
+  const graphHeight = height - paddingTop - paddingBottom;
+
+  // Compute scale — round up to a clean ceiling value
+  const rawMax = Math.max(...series.map(d => d.totalCost), 0.01);
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawMax)));
+  const maxCost = Math.ceil(rawMax / magnitude) * magnitude;
+  const totalPoints = series.length;
+
+  // Quarter grid values
+  const q1 = maxCost * 0.25;
+  const q2 = maxCost * 0.50;
+  const q3 = maxCost * 0.75;
+
+  // Build polyline & fill polygon point strings
+  let points = '';
+  let fillPoints = `${paddingLeft},${height - paddingBottom} `;
+  series.forEach((d, idx) => {
+    const x = paddingLeft + (idx / (totalPoints - 1 || 1)) * graphWidth;
+    const y = height - paddingBottom - (d.totalCost / maxCost) * graphHeight;
+    points += `${x.toFixed(1)},${y.toFixed(1)} `;
+    fillPoints += `${x.toFixed(1)},${y.toFixed(1)} `;
+  });
+  fillPoints += `${(paddingLeft + graphWidth).toFixed(1)},${height - paddingBottom}`;
+
+  // Unique gradient ID to avoid conflicts when chart is redrawn
+  const gradId = 'cg_' + Math.random().toString(36).slice(2, 7);
+
+  // Format helper for compact labels: "$1.2K", "$45.60" etc.
+  function fmtY(v) {
+    if (v >= 1000) return '$' + (v / 1000).toFixed(1) + 'K';
+    return '$' + v.toFixed(v < 10 ? 2 : 1);
+  }
+
+  // Y helper: pixel position for a given cost value
+  function yPos(v) { return height - paddingBottom - (v / maxCost) * graphHeight; }
+
+  const gridLines = [
+    { v: maxCost, label: fmtY(maxCost) },
+    { v: q3,      label: fmtY(q3) },
+    { v: q2,      label: fmtY(q2) },
+    { v: q1,      label: fmtY(q1) },
+    { v: 0,       label: '$0' }
+  ];
+
+  let svgHtml = `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="100%" style="overflow:visible">
+      <defs>
+        <linearGradient id="neon-line-grad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#00D1FF" />
+          <stop offset="100%" stop-color="#8A2BE2" />
+        </linearGradient>
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="rgba(0,209,255,0.22)" />
+          <stop offset="60%"  stop-color="rgba(138,43,226,0.06)" />
+          <stop offset="100%" stop-color="rgba(138,43,226,0.00)" />
+        </linearGradient>
+        <filter id="neon-glow" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="3.5" result="blur" />
+          <feComponentTransfer in="blur" result="glow1">
+            <feFuncA type="linear" slope="0.6" />
+          </feComponentTransfer>
+          <feMerge>
+            <feMergeNode in="glow1" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <style>
+          .cct-line { stroke-dasharray:4000; stroke-dashoffset:4000; animation:cctDraw 1.8s cubic-bezier(.4,0,.2,1) forwards; }
+          .cct-fill { opacity:0; animation:cctFill 1s 0.6s ease forwards; }
+          .cct-dot  { opacity:0; animation:cctFill 0.3s 1.8s ease forwards; }
+          @keyframes cctDraw { to { stroke-dashoffset:0; } }
+          @keyframes cctFill { to { opacity:1; } }
+        </style>
+      </defs>`;
+
+  // ── Grid lines + Y-axis labels (outside left) ──────────────────────────────
+  gridLines.forEach(g => {
+    const y = yPos(g.v);
+    const isBaseline = g.v === 0;
+    svgHtml += `
+      <line x1="${paddingLeft}" y1="${y.toFixed(1)}"
+            x2="${paddingLeft + graphWidth}" y2="${y.toFixed(1)}"
+            stroke="${isBaseline ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.1)'}"
+            stroke-width="${isBaseline ? 1.5 : 1}" />
+      <text x="${paddingLeft - 8}" y="${(y + 4).toFixed(1)}"
+            text-anchor="end"
+            font-family="Outfit,sans-serif" font-size="11" font-weight="600"
+            fill="${isBaseline ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.82)'}">${g.label}</text>`;
+  });
+
+  // ── Left vertical axis ──────────────────────────────────────────────────────
+  svgHtml += `
+    <line x1="${paddingLeft}" y1="${paddingTop}"
+          x2="${paddingLeft}" y2="${height - paddingBottom}"
+          stroke="rgba(255,255,255,0.15)" stroke-width="1.5" />`;
+
+  // ── Area fill ───────────────────────────────────────────────────────────────
+  svgHtml += `
+    <polygon class="cct-fill" points="${fillPoints}"
+             fill="url(#${gradId})" />`;
+
+  // ── Trend line ──────────────────────────────────────────────────────────────
+  svgHtml += `
+    <polyline class="cct-line" points="${points}"
+              fill="none" stroke="url(#neon-line-grad)" stroke-width="3"
+              filter="url(#neon-glow)"
+              stroke-linecap="round" stroke-linejoin="round" />`;
+
+  // ── Highlight dots on non-zero points (drawn last, on top) ─────────────────
+  series.forEach((d, idx) => {
+    if (d.totalCost > 0) {
+      const x = paddingLeft + (idx / (totalPoints - 1 || 1)) * graphWidth;
+      const y = height - paddingBottom - (d.totalCost / maxCost) * graphHeight;
+      svgHtml += `<circle class="cct-dot" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3"
+                    fill="#00D1FF" stroke="rgba(255,255,255,0.95)" stroke-width="1.5" />`;
+    }
+  });
+
+  // ── X-axis date stamps (Start / Mid / End) ──────────────────────────────────
+  if (totalPoints >= 2) {
+    const fmt = i => {
+      const d = series[i];
+      if (!d) return '';
+      const p = d.date.split('-');
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return `${months[parseInt(p[1],10)-1]} ${parseInt(p[2],10)}`;
+    };
+    const midIdx = Math.floor(totalPoints / 2);
+    const midX   = paddingLeft + graphWidth / 2;
+    const baseline = height - paddingBottom + 18;
+    svgHtml += `
+      <text x="${paddingLeft}" y="${baseline}" text-anchor="start"
+            font-family="Outfit,sans-serif" font-size="11" font-weight="600"
+            fill="rgba(255,255,255,0.75)">${fmt(0)}</text>
+      <text x="${midX.toFixed(1)}" y="${baseline}" text-anchor="middle"
+            font-family="Outfit,sans-serif" font-size="11" font-weight="600"
+            fill="rgba(255,255,255,0.75)">${fmt(midIdx)}</text>
+      <text x="${(paddingLeft + graphWidth).toFixed(1)}" y="${baseline}" text-anchor="end"
+            font-family="Outfit,sans-serif" font-size="11" font-weight="600"
+            fill="rgba(255,255,255,0.75)">${fmt(totalPoints - 1)}</text>`;
+  }
+
+  svgHtml += '</svg>';
+  container.innerHTML = svgHtml;
+}
+
+
+
+/**
+ * Model Mix Donut Chart
+ */
+function drawOrgModelDonut() {
+  const container = document.getElementById('org-model-chart');
+  container.innerHTML = '';
+
+  const mix = dashboardPayload.modelBreakdowns || {};
+  const aggregatedMap = {};
+  let totalCost = 0;
+
+  for (let m in mix) {
+    totalCost += mix[m].cost;
+    const cleanName = cleanModelName(m);
+    if (!aggregatedMap[cleanName]) {
+      aggregatedMap[cleanName] = 0;
+    }
+    aggregatedMap[cleanName] += mix[m].cost;
+  }
+
+  const dataList = [];
+  for (let cleanName in aggregatedMap) {
+    dataList.push({ name: cleanName, cost: aggregatedMap[cleanName] });
+  }
+
+  // Sort descending by cost
+  dataList.sort((a, b) => b.cost - a.cost);
+
+  if (totalCost === 0) {
+    container.innerHTML = `<p style="color: var(--text-muted);">No model metrics active.</p>`;
+    return;
+  }
+
+  const width = container.clientWidth || 300;
+  const height = 210;
+  const cx = width / 2;
+  const cy = height / 2;
+  const r = 70;
+  const strokeWidth = 24;
+
+  let currentAngle = -Math.PI / 2; // Start from top
+
+  const palette = [
+    'var(--accent-primary)',
+    'var(--accent-secondary)',
+    'var(--accent-success)',
+    'var(--accent-warning)',
+    'var(--accent-danger)'
+  ];
+
+  const circumference = 2 * Math.PI * r;
+  let arcAnimStyles = `<style>@keyframes arcIn { to { stroke-dashoffset: 0; } }</style>`;
+  let svgHtml = `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" style="overflow: visible;">${arcAnimStyles}`;
+
+  dataList.forEach((d, idx) => {
+    const percent = d.cost / totalCost;
+    const sweepAngle = percent * 2 * Math.PI;
+    const arcLen = sweepAngle * r;
+    const delay = (0.1 + idx * 0.18).toFixed(2);
+
+    // SVG Arc drawing coordinates
+    const startX = cx + r * Math.cos(currentAngle);
+    const startY = cy + r * Math.sin(currentAngle);
+
+    currentAngle += sweepAngle;
+
+    const endX = cx + r * Math.cos(currentAngle);
+    const endY = cy + r * Math.sin(currentAngle);
+
+    const largeArc = sweepAngle > Math.PI ? 1 : 0;
+    const color = palette[idx % palette.length];
+
+    svgHtml += `
+      <path d="M ${startX} ${startY} A ${r} ${r} 0 ${largeArc} 1 ${endX} ${endY}"
+            fill="none" stroke="${color}" stroke-width="${strokeWidth}" stroke-linecap="round"
+            stroke-dasharray="${arcLen} 999" stroke-dashoffset="${arcLen}"
+            style="animation: arcIn 0.85s ${delay}s cubic-bezier(0.4,0,0.2,1) forwards;" />
+    `;
+  });
+
+  // Center Text overlay — show top model's percentage
+  const topModel = dataList[0];
+  const topPct = topModel ? Math.round((topModel.cost / totalCost) * 100) : 0;
+  const topName = topModel ? topModel.name : '';
+  svgHtml += `
+    <text x="${cx}" y="${cy - 8}" text-anchor="middle" font-family="Outfit" font-weight="800" font-size="26" fill="#fff">${topPct}%</text>
+    <text x="${cx}" y="${cy + 10}" text-anchor="middle" font-family="Outfit" font-size="10" font-weight="600" fill="var(--accent-primary)">${topName}</text>
+    <text x="${cx}" y="${cy + 22}" text-anchor="middle" font-family="Outfit" font-size="8" font-weight="500" fill="var(--text-muted)" letter-spacing="0.5">TOP MODEL</text>
+  `;
+
+  svgHtml += '</svg>';
+
+  // HTML flexbox legend items
+  let legendHtml = `<div style="display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px 16px; width: 100%; margin-top: 10px; padding: 0 10px; box-sizing: border-box;">`;
+  dataList.forEach((d, idx) => {
+    const color = palette[idx % palette.length];
+    const nameStr = d.name;
+    legendHtml += `
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); font-family: 'Outfit', sans-serif; font-weight: 600; white-space: nowrap;">
+        <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background-color: ${color}; flex-shrink: 0;"></span>
+        <span>${nameStr}</span>
+      </div>
+    `;
+  });
+  legendHtml += `</div>`;
+
+  container.style.flexDirection = 'column';
+  container.style.height = 'auto';
+  container.innerHTML = svgHtml + legendHtml;
+}
+
+/**
+ * Top 5 Spenders bar chart
+ */
+function drawOrgTopSpenders() {
+  const container = document.getElementById('org-top-spenders');
+  container.innerHTML = '';
+
+  const users = [...(dashboardPayload.users || [])]
+    .sort((a, b) => b.totalCost - a.totalCost)
+    .slice(0, 5);
+
+  if (users.length === 0) {
+    container.innerHTML = `<p style="color: var(--text-muted);">No spenders mapped.</p>`;
+    return;
+  }
+
+  const width = container.clientWidth || 300;
+  const height = 300;
+  const paddingLeft = 100;
+  const graphWidth = width - paddingLeft - 30;
+  const maxCost = Math.max(...users.map(u => u.totalCost), 1);
+
+  let animStyles = '<style>';
+  let svgHtml = `<svg viewBox="0 0 ${width} ${height}" width="100%" height="100%">`;
+
+  users.forEach((u, idx) => {
+    const barY = 30 + idx * 50;
+    const barWidth = (u.totalCost / maxCost) * graphWidth;
+    const delay = (0.1 + idx * 0.1).toFixed(2);
+    animStyles += `@keyframes growS${idx}{from{width:0}to{width:${barWidth}px}} .sbar-${idx}{animation:growS${idx} 0.7s ${delay}s cubic-bezier(0.4,0,0.2,1) both;}`;
+
+    svgHtml += `
+      <text x="${paddingLeft - 10}" y="${barY + 15}" fill="var(--text-secondary)" font-size="11" font-weight="600" text-anchor="end">${u.name}</text>
+      <rect x="${paddingLeft}" y="${barY}" width="${graphWidth}" height="20" rx="4" fill="rgba(255,255,255,0.02)" />
+      <rect class="sbar-${idx}" x="${paddingLeft}" y="${barY}" width="${barWidth}" height="20" rx="4" fill="var(--accent-primary)" />
+      <text x="${paddingLeft + barWidth + 10}" y="${barY + 15}" fill="var(--text-primary)" font-size="10" font-weight="700" style="opacity:0;animation:areaFadeIn 0.4s ${(parseFloat(delay)+0.5).toFixed(2)}s forwards;">${formatCurrency(u.totalCost)}</text>
+    `;
+  });
+
+  svgHtml += animStyles + '</style></svg>';
+  container.innerHTML = svgHtml;
+}
+
+/**
+ * Top 5 Active Projects bar chart
+ */
+function drawOrgTopProjects() {
+  const container = document.getElementById('org-top-projects');
+  container.innerHTML = '';
+
+  const projects = [...(dashboardPayload.projects || [])]
+    .sort((a, b) => b.totalCost - a.totalCost)
+    .slice(0, 5);
+
+  if (projects.length === 0) {
+    container.innerHTML = `<p style="color: var(--text-muted);">No projects logged.</p>`;
+    return;
+  }
+
+  const width = container.clientWidth || 300;
+  const height = 300;
+  const paddingLeft = 140;
+  const graphWidth = width - paddingLeft - 30;
+  const maxCost = Math.max(...projects.map(p => p.totalCost), 1);
+
+  let animStyles = '<style>';
+  let svgHtml = `<svg viewBox="0 0 ${width} ${height}" width="100%" height="100%">`;
+
+  projects.forEach((p, idx) => {
+    const barY = 30 + idx * 50;
+    const barWidth = (p.totalCost / maxCost) * graphWidth;
+    const delay = (0.1 + idx * 0.1).toFixed(2);
+    let labelText = p.name.length > 20 ? p.name.substring(0, 18) + '...' : p.name;
+    animStyles += `@keyframes growP${idx}{from{width:0}to{width:${barWidth}px}} .pbar-${idx}{animation:growP${idx} 0.7s ${delay}s cubic-bezier(0.4,0,0.2,1) both;}`;
+
+    svgHtml += `
+      <text x="${paddingLeft - 10}" y="${barY + 15}" fill="var(--text-secondary)" font-size="11" font-weight="600" text-anchor="end">${labelText}</text>
+      <rect x="${paddingLeft}" y="${barY}" width="${graphWidth}" height="20" rx="4" fill="rgba(255,255,255,0.02)" />
+      <rect class="pbar-${idx}" x="${paddingLeft}" y="${barY}" width="${barWidth}" height="20" rx="4" fill="var(--accent-success)" />
+      <text x="${paddingLeft + barWidth + 10}" y="${barY + 15}" fill="var(--text-primary)" font-size="10" font-weight="700" style="opacity:0;animation:areaFadeIn 0.4s ${(parseFloat(delay)+0.5).toFixed(2)}s forwards;">${formatCurrency(p.totalCost)}</text>
+    `;
+  });
+
+  svgHtml += animStyles + '</style></svg>';
+  container.innerHTML = svgHtml;
+}
+
+/**
+ * 🔍 Detailed User Modal Open/Close handlers
+ */
+function openUserDetailModal(name) {
+  if (!dashboardPayload || !dashboardPayload.users) return;
+
+  const user = dashboardPayload.users.find(u => u.name === name);
+  if (!user) return;
+
+  const overlay = document.getElementById('user-detail-modal');
+  overlay.classList.add('active');
+
+  // Load summary details
+  document.getElementById('modal-user-avatar').innerText = user.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
+  document.getElementById('modal-user-name').innerText = user.name;
+  document.getElementById('modal-user-email').innerText = user.email;
+  document.getElementById('modal-value-score').innerText = user.valueScore;
+  document.getElementById('modal-cache-rate').innerText = `${user.cacheHitRate.toFixed(1)}%`;
+  document.getElementById('modal-total-cost').innerText = formatCurrency(user.totalCost);
+  document.getElementById('modal-active-days').innerText = user.activeDays;
+  document.getElementById('modal-projects-count').innerText = user.distinctProjects;
+
+  // Build model and project listing tables inside modal
+  populateModalTables(user);
+
+  // Render SVG Token Bar inside modal
+  drawModalTokenBar(user);
+
+  // Populate session timeline
+  populateSessionTimeline(user);
+
+  // Show tips section in modal if chat-only
+  const tipsSec = document.getElementById('modal-tips-section');
+  if (tipsSec) {
+    tipsSec.style.display = user.category.includes('Chat-Only') ? 'block' : 'none';
+  }
+}
+
+function closeUserDetailModal() {
+  document.getElementById('user-detail-modal').classList.remove('active');
+}
+
+/**
+ * Project Contributors Modal
+ */
+function openProjectDevsModal(projectName) {
+  if (!dashboardPayload || !dashboardPayload.projects) return;
+  const proj = dashboardPayload.projects.find(p => p.name === projectName);
+  if (!proj) return;
+
+  document.getElementById('proj-modal-name').innerText = projectName;
+  const devNames = proj.devNames || [];
+  document.getElementById('proj-modal-subtitle').innerText = `${devNames.length} contributor${devNames.length !== 1 ? 's' : ''} · ${proj.sessions} sessions · ${formatCurrency(proj.totalCost)} total`;
+
+  const list = document.getElementById('proj-devs-list');
+  list.innerHTML = '';
+
+  if (devNames.length === 0) {
+    list.innerHTML = `<p style="text-align:center;color:var(--text-muted);padding:1.5rem;">No contributor data available.</p>`;
+  } else {
+    devNames.forEach(name => {
+      const devUser = dashboardPayload.users ? dashboardPayload.users.find(u => u.name === name) : null;
+      const devCost = devUser ? formatCurrency(devUser.projects.find(p => p.name === projectName) ? (devUser.projects.find(p => p.name === projectName).cost || 0) : 0) : '—';
+      const devScore = devUser ? devUser.valueScore : '—';
+      const devCategory = devUser ? devUser.category : '';
+      const catClass = devUser ? getCategoryClass(devCategory) : 'inactive';
+      const initials = name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2).toUpperCase();
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:1rem;padding:0.9rem 1.25rem;border-bottom:1px solid var(--border-glass);transition:background 0.2s;';
+      row.onmouseover = () => row.style.background = 'rgba(255,255,255,0.03)';
+      row.onmouseout = () => row.style.background = '';
+      row.innerHTML = `
+        <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent-primary),var(--accent-secondary));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:0.8rem;color:#fff;flex-shrink:0;">${initials}</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;color:var(--text-primary);font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${name}</div>
+          <div style="font-size:0.72rem;color:var(--text-muted);margin-top:0.15rem;">${devUser ? devUser.email : ''}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;">
+          <div style="font-size:0.75rem;font-weight:700;color:var(--accent-primary);">${devCost}</div>
+          <div style="font-size:0.65rem;color:var(--text-muted);">on this project</div>
+        </div>
+        <div style="flex-shrink:0;">
+          <span class="category-badge ${catClass}" style="font-size:0.62rem;">${devCategory || 'Unknown'}</span>
+        </div>
+        <button onclick="closeProjectDevsModal();openUserDetailModal('${name.replace(/'/g, "\\'")}');" style="background:rgba(255,255,255,0.06);border:1px solid var(--border-glass);color:var(--text-secondary);border-radius:8px;padding:0.3rem 0.65rem;cursor:pointer;font-size:0.72rem;white-space:nowrap;flex-shrink:0;" title="Open full profile">
+          <i class="fa-solid fa-user" style="margin-right:0.25rem;"></i>Profile
+        </button>
+      `;
+      list.appendChild(row);
+    });
+  }
+
+  document.getElementById('project-devs-modal').classList.add('active');
+}
+
+function closeProjectDevsModal() {
+  document.getElementById('project-devs-modal').classList.remove('active');
+}
+
+/**
+ * Populates session timeline in user detail modal
+ */
+function populateSessionTimeline(user) {
+  const tbody = document.getElementById('modal-sessions-table-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  const sessions = user.recentSessions || [];
+  if (sessions.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:1rem;">No session data available.</td></tr>`;
+    return;
+  }
+
+  sessions.forEach(s => {
+    const tr = document.createElement('tr');
+    const modelShort = s.models ? s.models.replace(/claude-/gi, '').replace(/sonnet|opus|haiku/gi, m => m.charAt(0).toUpperCase() + m.slice(1).toLowerCase()) : '—';
+    tr.innerHTML = `
+      <td style="white-space:nowrap;">${formatReadableDate(s.date)}</td>
+      <td style="font-size:0.78rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${s.project}">${s.project}</td>
+      <td style="font-size:0.72rem;color:var(--text-secondary);">${modelShort || '—'}</td>
+      <td style="text-align:right;font-size:0.78rem;">${formatNumberAbbr(s.tokens)}</td>
+      <td style="text-align:right;font-weight:600;color:var(--accent-primary);">${formatCurrency(s.cost)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+/**
+ * Populates lists inside modal view
+ */
+function populateModalTables(user) {
+  // Models Table
+  const mBody = document.getElementById('modal-models-table-body');
+  mBody.innerHTML = '';
+  
+  const mBreakdown = user.modelCostBreakdown || {};
+  let mCount = 0;
+  for (let mName in mBreakdown) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${mName}</td>
+      <td style="text-align: right; font-weight: 600; color: var(--accent-primary);">${formatCurrency(mBreakdown[mName])}</td>
+    `;
+    mBody.appendChild(tr);
+    mCount++;
+  }
+  if (mCount === 0) {
+    mBody.innerHTML = `<tr><td colspan="2" style="text-align: center; color: var(--text-muted);">No model data found.</td></tr>`;
+  }
+
+  // Projects Table
+  const pBody = document.getElementById('modal-projects-table-body');
+  pBody.innerHTML = '';
+
+  const pList = user.projects || [];
+  pList.sort((a, b) => b.cost - a.cost);
+
+  pList.forEach(p => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-weight: 600;">${p.name}</td>
+      <td style="text-align: right; font-weight: 600; color: var(--accent-success);">${formatCurrency(p.cost)}</td>
+    `;
+    pBody.appendChild(tr);
+  });
+  if (pList.length === 0) {
+    pBody.innerHTML = `<tr><td colspan="2" style="text-align: center; color: var(--text-muted);">No projects logged.</td></tr>`;
+  }
+}
+
+/**
+ * Vertical / stacked token utilisation bars in detail modal
+ */
+function drawModalTokenBar(user) {
+  const container = document.getElementById('modal-token-chart');
+  container.innerHTML = '';
+
+  const input = user.inputTokens || 0;
+  const output = user.outputTokens || 0;
+  const cWrite = user.cacheCreationTokens || 0;
+  const cRead = user.cacheReadTokens || 0;
+  const total = input + output + cWrite + cRead;
+
+  if (total === 0) {
+    container.innerHTML = `<p style="color: var(--text-muted);">No token interactions logged.</p>`;
+    return;
+  }
+
+  const width = container.clientWidth || 400;
+  const height = 140;
+  const graphWidth = width - 40;
+  const barHeight = 24;
+
+  const wInput = (input / total) * graphWidth;
+  const wOutput = (output / total) * graphWidth;
+  const wWrite = (cWrite / total) * graphWidth;
+  const wRead = (cRead / total) * graphWidth;
+
+  const palette = {
+    input: 'var(--accent-secondary)',
+    output: 'var(--accent-primary)',
+    cWrite: 'var(--accent-warning)',
+    cRead: 'var(--accent-success)'
+  };
+
+  let svgHtml = `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="100%">
+      <!-- Grid Header -->
+      <text x="20" y="30" fill="var(--text-secondary)" font-size="11" font-weight="600">Token Distribution (Total: ${formatNumberAbbr(total)})</text>
+      
+      <!-- Stacked Bar Layout -->
+      <g transform="translate(20, 45)">
+        <rect x="0" y="0" width="${wRead}" height="${barHeight}" rx="4" fill="${palette.cRead}" />
+        <rect x="${wRead}" y="0" width="${wWrite}" height="${barHeight}" rx="4" fill="${palette.cWrite}" />
+        <rect x="${wRead + wWrite}" y="0" width="${wOutput}" height="${barHeight}" rx="4" fill="${palette.output}" />
+        <rect x="${wRead + wWrite + wOutput}" y="0" width="${wInput}" height="${barHeight}" rx="4" fill="${palette.input}" />
+      </g>
+      
+      <!-- Custom Legend Labels -->
+      <g transform="translate(20, 95)">
+        <circle cx="10" cy="5" r="4" fill="${palette.cRead}" />
+        <text x="20" y="9" fill="var(--text-secondary)" font-size="10" font-weight="600">Cache Read (${((cRead/total)*100).toFixed(0)}%)</text>
+        
+        <circle cx="150" cy="5" r="4" fill="${palette.cWrite}" />
+        <text x="160" y="9" fill="var(--text-secondary)" font-size="10" font-weight="600">Cache Write (${((cWrite/total)*100).toFixed(0)}%)</text>
+        
+        <circle cx="290" cy="5" r="4" fill="${palette.output}" />
+        <text x="300" y="9" fill="var(--text-secondary)" font-size="10" font-weight="600">Output (${((output/total)*100).toFixed(0)}%)</text>
+        
+        <circle cx="400" cy="5" r="4" fill="${palette.input}" />
+        <text x="410" y="9" fill="var(--text-secondary)" font-size="10" font-weight="600">Input (${((input/total)*100).toFixed(0)}%)</text>
+      </g>
+    </svg>
+  `;
+  container.innerHTML = svgHtml;
+}
+
+/**
+ * 💾 CSV Data Export Engine
+ */
+function exportLeaderboardToCSV() {
+  if (!dashboardPayload || !dashboardPayload.users) return;
+
+  let csvContent = 'data:text/csv;charset=utf-8,';
+  csvContent += 'Developer Name,Developer Email,Category,Value Score,Chat Score,Code Score,Equivalent Spend (USD),Active Days,Sessions Logged,Unique Projects,Cache Hit Rate %,Last Active,Primary Model\r\n';
+
+  dashboardPayload.users.forEach(u => {
+    const row = [
+      `"${u.name}"`,
+      `"${u.email}"`,
+      `"${u.category.substring(2)}"`,
+      u.valueScore,
+      u.chatScore,
+      u.codeScore,
+      u.totalCost.toFixed(2),
+      u.activeDays,
+      u.totalSessions,
+      u.distinctProjects,
+      u.cacheHitRate.toFixed(2),
+      u.lastActivity,
+      `"${u.primaryModel}"`
+    ].join(',');
+    csvContent += row + '\r\n';
+  });
+
+  triggerFileDownload(csvContent, 'claude_developer_leaderboard.csv');
+}
+
+function exportProjectsToCSV() {
+  if (!dashboardPayload || !dashboardPayload.projects) return;
+
+  let csvContent = 'data:text/csv;charset=utf-8,';
+  csvContent += 'Project Name,Active Developers Count,Sessions Logged,Total Cost Contribution (USD),Total Tokens Used,Last Active\r\n';
+
+  dashboardPayload.projects.forEach(p => {
+    const row = [
+      `"${p.name}"`,
+      p.devCount,
+      p.sessions,
+      p.totalCost.toFixed(2),
+      p.totalTokens,
+      p.lastActivity
+    ].join(',');
+    csvContent += row + '\r\n';
+  });
+
+  triggerFileDownload(csvContent, 'claude_project_engagement_report.csv');
+}
+
+function triggerFileDownload(content, fileName) {
+  const encodedUri = encodeURI(content);
+  const link = document.createElement('a');
+  link.setAttribute('href', encodedUri);
+  link.setAttribute('download', fileName);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+/**
+ * Displays error toasts/modals to the user
+ */
+function showErrorToast(msg) {
+  alert('Warning: ' + msg);
+}
+
+function capitalizeWords(str) {
+  return str.replace(/\b\w/g, function(char) {
+    return char.toUpperCase();
+  });
+}
+
+/**
+ * Opens a print-ready executive report in a new browser window
+ */
+function openPrintReport() {
+  if (!dashboardPayload) return;
+  const s = dashboardPayload.orgSummary;
+  const users = dashboardPayload.users || [];
+  const projects = dashboardPayload.projects || [];
+
+  const top5devs = [...users].sort((a,b) => b.totalCost - a.totalCost).slice(0,5);
+  const top5proj = [...projects].sort((a,b) => b.totalCost - a.totalCost).slice(0,5);
+
+  const devRows = top5devs.map(u => `
+    <tr>
+      <td>${u.name}</td>
+      <td>${u.category.replace(/^[^\w]+/, '')}</td>
+      <td style="text-align:right">${u.activeDays}</td>
+      <td style="text-align:right">${formatCurrency(u.totalCost)}</td>
+      <td style="text-align:right">${u.valueScore}</td>
+    </tr>`).join('');
+
+  const projRows = top5proj.map(p => `
+    <tr>
+      <td>${p.name}</td>
+      <td style="text-align:right">${p.devCount}</td>
+      <td style="text-align:right">${p.sessions}</td>
+      <td style="text-align:right">${formatCurrency(p.totalCost)}</td>
+    </tr>`).join('');
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+  <title>Claude ROI Report — ${new Date().toLocaleDateString()}</title>
+  <style>
+    body{font-family:system-ui,sans-serif;color:#111;padding:2rem;max-width:900px;margin:0 auto;}
+    h1{font-size:1.8rem;color:#1e40af;margin-bottom:0.25rem;}
+    .meta{color:#666;font-size:0.85rem;margin-bottom:2rem;}
+    .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem;}
+    .kpi{background:#f0f4ff;border-radius:8px;padding:1rem;text-align:center;}
+    .kpi-val{font-size:1.6rem;font-weight:700;color:#1e40af;}
+    .kpi-lbl{font-size:0.7rem;text-transform:uppercase;color:#555;margin-top:0.25rem;}
+    table{width:100%;border-collapse:collapse;margin-bottom:2rem;}
+    th{background:#1e40af;color:#fff;padding:0.6rem;text-align:left;font-size:0.8rem;}
+    td{padding:0.55rem;border-bottom:1px solid #e5e7eb;font-size:0.85rem;}
+    h2{font-size:1.1rem;font-weight:700;color:#1e40af;margin:1.5rem 0 0.75rem;}
+    .footer{text-align:center;font-size:0.75rem;color:#999;margin-top:2rem;}
+    @media print{body{padding:0;}button{display:none;}}
+  </style></head><body>
+  <button onclick="window.print()" style="float:right;padding:0.5rem 1rem;background:#1e40af;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;">Print / Save PDF</button>
+  <h1>Claude AI ROI Executive Report</h1>
+  <p class="meta">Sigma Solve &nbsp;|&nbsp; Period: ${formatReadableDate(s.reportPeriod.from)} to ${formatReadableDate(s.reportPeriod.to)} &nbsp;|&nbsp; Generated: ${new Date().toLocaleDateString()}</p>
+  <div class="kpi-row">
+    <div class="kpi"><div class="kpi-val">${formatCurrency(s.totalCodeCost)}</div><div class="kpi-lbl">Total API Cost Equiv.</div></div>
+    <div class="kpi"><div class="kpi-val">${formatCurrency(s.flatSubscriptionSpend)}</div><div class="kpi-lbl">Flat Subscription Spend</div></div>
+    <div class="kpi"><div class="kpi-val">${s.activeUsersCount}/${s.totalLicenses}</div><div class="kpi-lbl">Active Developers</div></div>
+    <div class="kpi"><div class="kpi-val">${s.licenseUtilization}%</div><div class="kpi-lbl">License Utilization</div></div>
+  </div>
+  <h2>Top 5 Developers by Usage</h2>
+  <table><thead><tr><th>Developer</th><th>Category</th><th>Active Days</th><th>API Cost</th><th>Value Score</th></tr></thead>
+  <tbody>${devRows}</tbody></table>
+  <h2>Top 5 Active Projects</h2>
+  <table><thead><tr><th>Project</th><th>Developers</th><th>Sessions</th><th>Cost</th></tr></thead>
+  <tbody>${projRows}</tbody></table>
+  <div class="footer">Sigma Solve Claude ROI Dashboard &nbsp;|&nbsp; Auto-generated ${new Date().toISOString()}</div>
+  </body></html>`;
+
+  const win = window.open('', '_blank');
+  win.document.write(html);
+  win.document.close();
+}
+
+/**
+ * Saves webhook URL to script properties
+ */
+function saveWebhookConfig() {
+  const url = document.getElementById('webhook-url-input').value.trim();
+  const msg = document.getElementById('webhook-status-msg');
+  if (!url) { msg.style.color = 'var(--accent-danger)'; msg.innerText = 'Please enter a webhook URL.'; return; }
+  google.script.run
+    .withSuccessHandler(() => { msg.style.color = 'var(--accent-success)'; msg.innerText = 'Webhook URL saved successfully.'; })
+    .withFailureHandler(e => { msg.style.color = 'var(--accent-danger)'; msg.innerText = 'Save failed: ' + e; })
+    .setWebhookConfig(url);
+}
+
+/**
+ * Sends a test alert to the webhook
+ */
+function sendTestWebhookAlert() {
+  const url = document.getElementById('webhook-url-input').value.trim();
+  const msg = document.getElementById('webhook-status-msg');
+  msg.style.color = 'var(--text-muted)'; msg.innerText = 'Sending test alert...';
+  google.script.run
+    .withSuccessHandler(r => { msg.style.color = r.success ? 'var(--accent-success)' : 'var(--accent-danger)'; msg.innerText = r.success ? 'Test alert sent! Check your channel.' : 'Alert failed (HTTP ' + r.status + ')'; })
+    .withFailureHandler(e => { msg.style.color = 'var(--accent-danger)'; msg.innerText = 'Error: ' + e; })
+    .sendTestAlert(url);
+}
+
+/**
+ * Sends a full digest to the configured webhook
+ */
+function sendDigestNow() {
+  const msg = document.getElementById('webhook-status-msg');
+  msg.style.color = 'var(--text-muted)'; msg.innerText = 'Sending digest...';
+  google.script.run
+    .withSuccessHandler(r => { msg.style.color = r.success ? 'var(--accent-success)' : 'var(--accent-danger)'; msg.innerText = r.success ? 'Digest sent successfully!' : 'Failed: ' + (r.message || 'HTTP ' + r.status); })
+    .withFailureHandler(e => { msg.style.color = 'var(--accent-danger)'; msg.innerText = 'Error: ' + e; })
+    .sendDigestAlert();
+}
+
+/**
+ * Loads the saved webhook URL into the input field
+ */
+function loadWebhookUrl() {
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.webhookUrl) document.getElementById('webhook-url-input').value = r.webhookUrl;
+    })
+    .getWebhookConfig();
+}
+
+/**
+ * Updates the ROI simulator display based on slider value
+ */
+function updateRoiSimulator() {
+  if (!dashboardPayload) return;
+  const s = dashboardPayload.orgSummary;
+  const val = parseInt(document.getElementById('sim-slider').value, 10);
+  document.getElementById('sim-reclaim-count').innerText = val;
+
+  const fee = s.licenseMonthlyFee || 20;
+  const monthlySavings = val * fee;
+  const annualSavings = monthlySavings * 12;
+  const newLicenses = Math.max(1, s.totalLicenses - val);
+  const newUtil = newLicenses > 0 ? Math.min(100, Math.round((s.activeUsersCount / newLicenses) * 100)) : 100;
+  const newSubSpend = newLicenses * fee;
+  const roiIdx = newSubSpend > 0 ? Math.round((s.totalCodeCost / newSubSpend) * 100) : 0;
+
+  document.getElementById('sim-monthly-savings').innerText = formatCurrency(monthlySavings);
+  document.getElementById('sim-annual-savings').innerText = formatCurrency(annualSavings);
+  document.getElementById('sim-new-utilization').innerText = newUtil + '%';
+  document.getElementById('sim-roi-index').innerText = roiIdx + '%';
+}
+
+/**
+ * Initializes the ROI simulator slider max value and resets display
+ */
+function initRoiSimulator() {
+  if (!dashboardPayload) return;
+  const s = dashboardPayload.orgSummary;
+  const slider = document.getElementById('sim-slider');
+  if (!slider) return;
+  const maxReclaim = Math.max(0, s.totalLicenses - 1);
+  slider.max = maxReclaim;
+  slider.value = 0;
+  updateRoiSimulator();
+}
+
+/**
+ * Renders the adoption tips panel for chat-only users
+ */
+function renderAdoptionTips() {
+  if (!dashboardPayload) return;
+  const chatOnlyUsers = dashboardPayload.users.filter(u => u.category.includes('Chat-Only'));
+  const tipsPanel = document.getElementById('tips-panel');
+  if (!tipsPanel) return;
+
+  if (chatOnlyUsers.length === 0) {
+    tipsPanel.style.display = 'none';
+    return;
+  }
+
+  tipsPanel.style.display = 'block';
+  const listEl = document.getElementById('tips-user-list');
+  listEl.innerHTML = chatOnlyUsers.map(u => {
+    const initials = u.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
+    return `<span style="display:inline-flex;align-items:center;gap:0.5rem;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:100px;padding:0.3rem 0.75rem;margin:0.2rem;font-size:0.8rem;">
+      <span style="width:22px;height:22px;background:linear-gradient(135deg,var(--accent-success),var(--accent-primary));border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:0.65rem;font-weight:700;color:#fff;">${initials}</span>
+      ${u.name}
+    </span>`;
+  }).join('');
+}
+</script>

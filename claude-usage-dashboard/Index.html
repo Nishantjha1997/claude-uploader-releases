@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Claude Usage Analytics & ROI Dashboard</title>
+  <!-- Google Fonts Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- FontAwesome for Premium Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- CSS Module Embed -->
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+  <!-- 🌌 Animated Ambient Background Orbs + Particles -->
+  <div class="ambient-background">
+    <div class="ambient-orb orb-1"></div>
+    <div class="ambient-orb orb-2"></div>
+    <div class="ambient-orb orb-3"></div>
+    <div class="ambient-orb orb-4"></div>
+    <div class="ambient-orb orb-5"></div>
+    <div class="particle-field">
+      <span></span><span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span>
+    </div>
+  </div>
+
+  <!-- ⏳ Loading Screen Overlay -->
+  <div id="loading-overlay">
+    <div class="loader-rings">
+      <div class="ring ring-1"></div>
+      <div class="ring ring-2"></div>
+      <div class="ring ring-3"></div>
+      <div class="ring-icon">
+        <svg viewBox="0 0 100 100" width="52" height="52">
+          <defs>
+            <linearGradient id="logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="hsl(217, 91%, 60%)" />
+              <stop offset="100%" stop-color="hsl(262, 83%, 58%)" />
+            </linearGradient>
+          </defs>
+          <circle cx="50" cy="50" r="40" fill="none" stroke="url(#logo-grad)" stroke-width="8" stroke-dasharray="180 50" />
+          <path d="M50 30 L50 70 M30 50 L70 50" stroke="url(#logo-grad)" stroke-width="8" stroke-linecap="round" />
+        </svg>
+      </div>
+    </div>
+    <div class="loader-bar">
+      <div class="loader-progress"></div>
+    </div>
+    <div class="loader-text">Analyzing Claude Usage Reports...</div>
+  </div>
+
+  <!-- 🏢 Main Layout Shell -->
+  <div id="app-shell">
+
+    <!-- 🧭 Sidebar Panel -->
+    <aside id="sidebar">
+      <div class="brand-section">
+        <div class="logo-container">
+          <img class="brand-logo" src="data:image/png;base64,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6P8yF1ewrYVJ6IwQERERERGNlojMRGQl/bMS28JJREREREREXREbJC4DB4QiNg+z0MeDiIiIiIhor4nIiYicS7etiUsRORPb1ZWIiIioVPMxh0RE5M0Fa5H7mUBnfOIVgBXgJpgClpx9lIiIiKpicEhE1BMuYJy4P3dN8LVyPwCwMsasSt9JRERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERUkwmdASIiIiKiPhCRCMAEwCGAJQAYY5JwOSLqFoNDop4RkQnsjekD3piIqA3uQfgMwCMAbwGchyhvROQQwEnu5aUx5qbrvITgPn+Eu2MQAbiBC04AJNij49E1d/zPAUwBHBS9xxiz9ZlZRGaw19IEwALA3Biz0sznjv1PwGcHIqLxEZG55ITOExGNj4gcishNrrgJEnyISJQv91zgOmoiMhORpOCzl1nsw3HpkoicFFwHeUmFNLy20SZ8diAlvxI6A0RERBREUSvJgdgWEGqRC4ZXAN4AOPXY9BGAdy6gzLe0kiexLYYLlLQWZix2/P9ZwWunYlvziAblG6EzQEREw+SCiEnmpZUxJg6SGapj5fn6BteKFWW35TmwnYjMAbxomMwpgEREzni8G5kBOCp4/Qq2K+8J7NjDZEc6q4LX1rBdg4mIiOpj1xAaCtnsDpeEzhP5afodFpRXXttn0tmLbqUiEhd8zqwb951kf3Z1eZyF/lxDVXD+i4hMa6RT1EV73kKWt+WBzw6kgi2HREREe8oYE7ngIgKwMMbs6j5HNYlIDOBpyX9fwE4GtCz6Txcoz0q2fyMiN/zuasl36X1b5zgaY27EdiGdwl5Lpd8lUd8xOCQiItpjrltiHDgbo+Zao4oCuysA012zWrpZJxMXYBaNkYtFZMLZTBurHdC5Yx+D1xINHCekISIiImqJ2ElP4oL/ugAQ+Sx34ILECHY8W9YB7FIMRESNMDgkIiIias8ZNlv6rgCc1Wnpc90VI2wGiE+Fs2MSUUPsVko0MrK5EO4qXzMtmzMMAna2taTpor0Fk0jcW7jZ1aJPc3lM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Rnuh9cwCMDgkopEyxswBfILNgf7bXAN47IJLTXHBa1cakze4m5HP51zDfsak6b4z+3+G7Q80lQIDY8yNu8HtSi9vDfugfNLzh9SiQK5ScFeyXmLl7dvkHih3fWdRN7npP3eeT2Gv2zrrAl4A+LYr4zTys4C9Rn3yMpRrblDcPWGC6pUHVwBU17ateT7Avf87QwwMU+7e/xj+zw2fNPnc7vuLsD04Ldv3Y83AEAC+oZkYEalIlLdfeW6/wmarm08aTbYFbCCVNNj+AxcATcT2w5/B3vDyNZ5rt79Fize1c2zW6iZaiWc+5wy29S3CZg3nFeyxjTMPczEUjrUxJhY75mjm9p3tYrbyTdd9D/GOz7OGnQ1vgfufqc8SbF4fPsHdGXKBds2ZbrNi6J4DU/eTPQdusPt8X6FHZUcX3HUbiR1XlB63CTbLqGvYcz2BLadWLeRlhbv1N2ew11xRS8UldK65Fbb37qgiv30SKA3VtNxxTZc9OoP9LvLnxBXsuTDPvLYqyEMtHufDFeznjBsGqL259l1wvNhx/7nG3fWoUkGX9sQRO9wkLQ+Kesqk5UGbzyxERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERPf9H7ZyMf2eYiq0AAAAAElFTkSuQmCC" alt="Sigma Solve Logo">
+          <div class="brand-subtitle">Claude ROI Tracker</div>
+        </div>
+      </div>
+      
+      <ul class="nav-menu">
+        <li class="nav-item active" data-page="dashboard">
+          <i class="fa-solid fa-chart-line"></i>
+          <span>Executive Summary</span>
+        </li>
+        <li class="nav-item" data-page="leaderboard">
+          <i class="fa-solid fa-users"></i>
+          <span>Developer Leaderboard</span>
+        </li>
+        <li class="nav-item" data-page="projects">
+          <i class="fa-solid fa-folder-tree"></i>
+          <span>Project Analytics</span>
+        </li>
+        <li class="nav-item" data-page="optimization">
+          <i class="fa-solid fa-shield-halved"></i>
+          <span>License Optimization</span>
+        </li>
+        <li class="nav-item" data-page="export">
+          <i class="fa-solid fa-file-export"></i>
+          <span>Reports & Export</span>
+        </li>
+        <li class="nav-item" data-page="methodology">
+          <i class="fa-solid fa-book-open"></i>
+          <span>Methodology</span>
+        </li>
+      </ul>
+
+      <div class="sidebar-footer">
+        <div style="font-size:0.68rem;color:var(--text-muted);text-align:center;line-height:1.5;">Claude ROI Dashboard<br>Sigma Solve &copy; 2025</div>
+      </div>
+    </aside>
+
+    <!-- 💻 Content Shell -->
+    <main id="content-area">
+      <header>
+        <div class="header-meta">
+          <h1 id="page-title">Executive Summary</h1>
+          <p id="page-subtitle">Report Period: Scanning... | Generated: N/A</p>
+        </div>
+        <div class="header-actions">
+          <span class="last-refreshed-badge" id="last-refreshed-badge"><i class="fa-solid fa-circle-dot" style="color:var(--accent-success);margin-right:0.35rem;font-size:0.6rem;"></i>Live</span>
+          <button class="sync-pill-btn" onclick="triggerManualSync()">
+            <i id="refresh-icon" class="fa-solid fa-rotate"></i>
+            Sync Data
+          </button>
+        </div>
+      </header>
+
+      <!-- 🪟 PAGE 1: EXECUTIVE SUMMARY -->
+      <section id="page-dashboard" class="dashboard-page active">
+        <!-- KPI Strips -->
+        <div class="stat-grid">
+          <div class="glass-card stat-card">
+            <div class="stat-header">
+              <span>Total API Cost</span>
+              <i class="fa-solid fa-coins"></i>
+            </div>
+            <div class="stat-value" id="kpi-total-cost">$0.00</div>
+            <div class="stat-subtitle">Usage equivalent in commercial value</div>
+          </div>
+          <div class="glass-card stat-card success">
+            <div class="stat-header">
+              <span>Flat Subscription Spend</span>
+              <i class="fa-solid fa-wallet"></i>
+            </div>
+            <div class="stat-value" id="kpi-subscription-spend">$0.00</div>
+            <div class="stat-subtitle">Based on flat $20/month per license</div>
+          </div>
+          <div class="glass-card stat-card warning">
+            <div class="stat-header">
+              <span>Active Developers</span>
+              <i class="fa-solid fa-user-check"></i>
+            </div>
+            <div class="stat-value" id="kpi-active-devs">0 / 0</div>
+            <div class="stat-subtitle" id="kpi-utilization-rate">Utilization: 0%</div>
+          </div>
+          <div class="glass-card stat-card secondary">
+            <div class="stat-header">
+              <span>ROI Index</span>
+              <i class="fa-solid fa-rocket"></i>
+            </div>
+            <div class="stat-value roi-value" id="kpi-roi-index">—</div>
+            <div class="stat-subtitle">API value vs flat license spend</div>
+          </div>
+        </div>
+
+        <!-- Org Level Alert Banner -->
+        <div class="alert-strip warning" id="org-action-alert" style="display: none;">
+          <i class="fa-solid fa-triangle-exclamation"></i>
+          <span id="org-action-alert-text">Reclamation Alert: 0 licenses are currently completely inactive. Review Action Items in the License Optimization tab.</span>
+        </div>
+
+        <!-- SVGs/Charts Row -->
+        <div class="charts-grid">
+          <div class="glass-card">
+            <div class="chart-header">
+              <h3>Organization Code Cost Trend</h3>
+              <p style="font-size: 0.8rem; color: var(--text-secondary);">Daily cost in USD across all active developers</p>
+            </div>
+            <div class="chart-canvas" id="org-cost-chart">
+              <!-- Inline SVG injected by JS -->
+            </div>
+          </div>
+          <div class="glass-card">
+            <div class="chart-header">
+              <h3>Model Cost Mix</h3>
+            </div>
+            <div class="chart-canvas" id="org-model-chart">
+              <!-- Inline SVG injected by JS -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Spenders & Projects -->
+        <div class="charts-grid" style="grid-template-columns: 1fr 1fr;">
+          <div class="glass-card">
+            <div class="chart-header">
+              <h3>Top 5 High-Usage Developers</h3>
+            </div>
+            <div class="chart-canvas" id="org-top-spenders">
+              <!-- Inline SVG injected by JS -->
+            </div>
+          </div>
+          <div class="glass-card">
+            <div class="chart-header">
+              <h3>Top 5 Active Projects</h3>
+            </div>
+            <div class="chart-canvas" id="org-top-projects">
+              <!-- Inline SVG injected by JS -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 👥 PAGE 2: DEVELOPER LEADERBOARD -->
+      <section id="page-leaderboard" class="dashboard-page">
+        <div class="glass-card" style="margin-bottom: 2rem;">
+          <div class="controls-row">
+            <div class="search-wrapper">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <input type="text" id="leaderboard-search" class="search-input" placeholder="Search developer name or email..." oninput="filterLeaderboardTable()">
+            </div>
+            <div class="filter-wrapper">
+              <select id="leaderboard-filter-category" class="filter-select" onchange="filterLeaderboardTable()">
+                <option value="ALL">All Categories</option>
+                <option value="POWER"> Power Users</option>
+                <option value="CHAT"> Chat-Only</option>
+                <option value="CODE">⚡ Code-Only</option>
+                <option value="LOW">⚠️ Low Engagement</option>
+                <option value="INACTIVE">❌ Truly Inactive</option>
+              </select>
+              <button class="export-btn" onclick="exportLeaderboardToCSV()">
+                <i class="fa-solid fa-file-csv"></i>
+                <span>Export Leaderboard</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th onclick="sortLeaderboardTable(0)">Developer <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortLeaderboardTable(1)">Category <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortLeaderboardTable(2)" style="text-align: right;">Value Score <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortLeaderboardTable(3)" style="text-align: right;">Cost (USD) <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortLeaderboardTable(4)" style="text-align: right;">Active Days <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortLeaderboardTable(5)" style="text-align: right;">Projects <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortLeaderboardTable(6)" style="text-align: right;">Cache Hit Rate <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortLeaderboardTable(7)">Last Activity <i class="fa-solid fa-sort"></i></th>
+                  <th>7-Day Trend</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="leaderboard-table-body">
+                <!-- Rows injected dynamically by JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 📁 PAGE 3: PROJECT ANALYTICS -->
+      <section id="page-projects" class="dashboard-page">
+        <div class="glass-card">
+          <div class="controls-row">
+            <div class="search-wrapper">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <input type="text" id="project-search" class="search-input" placeholder="Search project name..." oninput="filterProjectTable()">
+            </div>
+            <button class="export-btn" onclick="exportProjectsToCSV()">
+              <i class="fa-solid fa-file-csv"></i>
+              <span>Export Projects</span>
+            </button>
+          </div>
+
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th onclick="sortProjectTable(0)">Project Name <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortProjectTable(1)" style="text-align: right;">Developers Active <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortProjectTable(2)" style="text-align: right;">Total Sessions <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortProjectTable(3)" style="text-align: right;">Total Cost (USD) <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortProjectTable(4)" style="text-align: right;">Total Tokens <i class="fa-solid fa-sort"></i></th>
+                  <th onclick="sortProjectTable(5)">Last Active <i class="fa-solid fa-sort"></i></th>
+                </tr>
+              </thead>
+              <tbody id="projects-table-body">
+                <!-- Rows injected dynamically by JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 📋 PAGE 4: LICENSE OPTIMIZATION -->
+      <section id="page-optimization" class="dashboard-page">
+        <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
+          <div class="glass-card stat-card danger">
+            <div class="stat-header">
+              <span>Wasted Licenses Detected</span>
+              <i class="fa-solid fa-circle-exclamation"></i>
+            </div>
+            <div class="stat-value" id="kpi-wasted-licenses">0</div>
+            <div class="stat-subtitle">Developers with zero activity or low engagement</div>
+          </div>
+          <div class="glass-card stat-card success">
+            <div class="stat-header">
+              <span>Potential Annual Savings</span>
+              <i class="fa-solid fa-piggy-bank"></i>
+            </div>
+            <div class="stat-value" id="kpi-annual-savings">$0.00</div>
+            <div class="stat-subtitle">Based on reclamation recommendations</div>
+          </div>
+        </div>
+
+        <!-- Adoption Tips Panel (shown if chat-only users exist) -->
+        <div class="glass-card" id="tips-panel" style="display:none; margin-bottom: 2rem; border-left: 3px solid var(--accent-success); padding: 1.5rem;">
+          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+            <i class="fa-solid fa-lightbulb" style="color: var(--accent-warning); font-size: 1.25rem;"></i>
+            <h3 style="font-size: 1rem; font-family: 'Outfit'; font-weight: 700;">Developer Adoption Opportunities Detected</h3>
+          </div>
+          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1.25rem;">
+            The following developers are active in Claude chat but haven't yet adopted full <strong style="color: var(--text-primary);">Claude Code</strong> (inline code edits, file operations, repo scanning).
+            Sharing these quick-start tips can unlock significant productivity gains.
+          </p>
+          <div id="tips-user-list" style="margin-bottom: 1.25rem;"></div>
+          <div style="background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.15); border-radius: var(--radius-md); padding: 1.25rem;">
+            <h4 style="font-size: 0.85rem; font-weight: 700; color: var(--accent-success); margin-bottom: 0.75rem;">Quick-Start Tips to Share</h4>
+            <ul style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.8; padding-left: 1.25rem;">
+              <li>Run <code style="background:rgba(255,255,255,0.06);padding:0.1rem 0.4rem;border-radius:4px;">claude</code> in any project directory to start an inline session</li>
+              <li>Use <code style="background:rgba(255,255,255,0.06);padding:0.1rem 0.4rem;border-radius:4px;">/edit filename</code> to let Claude directly modify files</li>
+              <li>Enable auto-approve for low-risk operations to reduce interruptions</li>
+              <li>Try <code style="background:rgba(255,255,255,0.06);padding:0.1rem 0.4rem;border-radius:4px;">claude --print "describe the architecture"</code> for one-shot queries</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="glass-card" style="margin-bottom: 2rem;">
+          <div class="chart-header" style="margin-bottom: 1.5rem; flex-direction: column; align-items: flex-start; gap: 0.5rem;">
+            <h3>License Reclamation Recommendations</h3>
+            <p style="font-size: 0.8rem; color: var(--text-secondary);">
+              The following users are recommended for removal or training. Active developers with $\ge$ \$10.00 cost or $\ge$ 3 active days are automatically protected.
+            </p>
+          </div>
+
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th>Developer</th>
+                  <th>Category</th>
+                  <th style="text-align: right;">Active Days</th>
+                  <th style="text-align: right;">Equivalent Cost</th>
+                  <th style="text-align: right;">Value Score</th>
+                  <th>Last Active</th>
+                  <th>Removal Safety Guard</th>
+                  <th>Confidence</th>
+                  <th>Action Needed</th>
+                </tr>
+              </thead>
+              <tbody id="optimization-table-body">
+                <!-- Dynamic candidates list -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ROI Interactive Simulator -->
+        <div class="glass-card" style="margin-top: 2rem; padding: 2rem;">
+          <div class="chart-header" style="margin-bottom: 1.5rem;">
+            <h3><i class="fa-solid fa-sliders" style="color: var(--accent-warning); margin-right: 0.5rem;"></i> ROI Interactive Simulator</h3>
+            <p style="font-size: 0.8rem; color: var(--text-secondary);">Drag the slider to simulate reclaiming licenses and see the projected financial impact in real time.</p>
+          </div>
+          <div style="margin-bottom: 1.5rem;">
+            <label style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 600;">Simulate reclaiming <span id="sim-reclaim-count" style="color: var(--accent-warning); font-weight: 700;">0</span> license(s)</label>
+            <input type="range" id="sim-slider" min="0" max="10" value="0" oninput="updateRoiSimulator()" style="width: 100%; margin-top: 0.75rem; accent-color: var(--accent-warning);">
+          </div>
+          <div class="stat-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 0;">
+            <div class="glass-card" style="background: rgba(255,255,255,0.02); text-align: center; padding: 1.25rem;">
+              <div style="font-size: 1.5rem; font-family: 'Outfit'; font-weight: 700; color: var(--accent-success);" id="sim-monthly-savings">$0.00</div>
+              <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-top: 0.25rem;">Monthly Savings</div>
+            </div>
+            <div class="glass-card" style="background: rgba(255,255,255,0.02); text-align: center; padding: 1.25rem;">
+              <div style="font-size: 1.5rem; font-family: 'Outfit'; font-weight: 700; color: var(--accent-success);" id="sim-annual-savings">$0.00</div>
+              <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-top: 0.25rem;">Annual Savings</div>
+            </div>
+            <div class="glass-card" style="background: rgba(255,255,255,0.02); text-align: center; padding: 1.25rem;">
+              <div style="font-size: 1.5rem; font-family: 'Outfit'; font-weight: 700; color: var(--accent-primary);" id="sim-new-utilization">0%</div>
+              <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-top: 0.25rem;">New Utilization</div>
+            </div>
+            <div class="glass-card" style="background: rgba(255,255,255,0.02); text-align: center; padding: 1.25rem;">
+              <div style="font-size: 1.5rem; font-family: 'Outfit'; font-weight: 700; color: var(--accent-secondary);" id="sim-roi-index">—</div>
+              <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-top: 0.25rem;">ROI Index</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 💾 PAGE 5: DATA EXPORTS -->
+      <section id="page-export" class="dashboard-page">
+        <div class="charts-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+          <div class="glass-card" style="display: flex; flex-direction: column; justify-content: space-between; height: 280px; padding: 2rem;">
+            <div>
+              <i class="fa-solid fa-users-gear" style="font-size: 2.5rem; color: var(--accent-primary); margin-bottom: 1rem;"></i>
+              <h3 style="font-size: 1.25rem; font-family: 'Outfit'; margin-bottom: 0.5rem;">Developer Leaderboard Summary</h3>
+              <p style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.4;">
+                Download a comprehensive CSV summary of developer categories, tokens consumed, prompt cache performance, active coding days, and calculated value scores.
+              </p>
+            </div>
+            <button class="refresh-btn" onclick="exportLeaderboardToCSV()" style="background: var(--accent-primary); border: none; font-weight: 600; padding: 0.85rem;">
+              <i class="fa-solid fa-download"></i> Download Developer CSV
+            </button>
+          </div>
+
+          <div class="glass-card" style="display: flex; flex-direction: column; justify-content: space-between; height: 280px; padding: 2rem;">
+            <div>
+              <i class="fa-solid fa-folder-open" style="font-size: 2.5rem; color: var(--accent-success); margin-bottom: 1rem;"></i>
+              <h3 style="font-size: 1.25rem; font-family: 'Outfit'; margin-bottom: 0.5rem;">Project Engagement Summary</h3>
+              <p style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.4;">
+                Download a clean report detailing repository activity, sessions logged, active engineers count, and commercial token value created per project.
+              </p>
+            </div>
+            <button class="refresh-btn" onclick="exportProjectsToCSV()" style="background: var(--accent-success); border: none; font-weight: 600; padding: 0.85rem;">
+              <i class="fa-solid fa-download"></i> Download Project CSV
+            </button>
+          </div>
+
+          <div class="glass-card" style="display: flex; flex-direction: column; justify-content: space-between; height: 280px; padding: 2rem;">
+            <div>
+              <i class="fa-solid fa-file-pdf" style="font-size: 2.5rem; color: var(--accent-danger); margin-bottom: 1rem;"></i>
+              <h3 style="font-size: 1.25rem; font-family: 'Outfit'; margin-bottom: 0.5rem;">Executive Report Card</h3>
+              <p style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.4;">
+                Generate a full management-grade printable report with KPI summary, top spenders, active projects, and license optimization recommendations.
+              </p>
+            </div>
+            <button class="refresh-btn" onclick="openPrintReport()" style="background: var(--accent-danger); border: none; font-weight: 600; padding: 0.85rem;">
+              <i class="fa-solid fa-print"></i> Print Executive Report
+            </button>
+          </div>
+        </div>
+
+        <!-- Slack / Google Chat Alerts Config -->
+        <div class="glass-card" style="margin-top: 2rem; padding: 2rem;">
+          <div class="chart-header" style="margin-bottom: 1.5rem;">
+            <h3><i class="fa-brands fa-slack" style="color: var(--accent-primary); margin-right: 0.5rem;"></i> Webhook Alert Configuration</h3>
+            <p style="font-size: 0.8rem; color: var(--text-secondary);">Connect Slack, Google Chat, or any webhook-compatible service to receive automated reports.</p>
+          </div>
+          <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
+            <input type="url" id="webhook-url-input" class="search-input" style="max-width: 480px; flex: 1;" placeholder="https://hooks.slack.com/services/... or Google Chat webhook URL">
+            <button class="export-btn" onclick="saveWebhookConfig()" style="background: var(--accent-success);">
+              <i class="fa-solid fa-floppy-disk"></i> Save
+            </button>
+            <button class="export-btn" onclick="sendTestWebhookAlert()" style="background: rgba(255,255,255,0.08); border: 1px solid var(--border-glass); color: var(--text-primary);">
+              <i class="fa-solid fa-paper-plane"></i> Test Alert
+            </button>
+            <button class="export-btn" onclick="sendDigestNow()" style="background: var(--accent-secondary);">
+              <i class="fa-solid fa-newspaper"></i> Send Digest Now
+            </button>
+          </div>
+          <p id="webhook-status-msg" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.75rem;"></p>
+        </div>
+      </section>
+
+      <!-- 📚 PAGE 6: METHODOLOGY & CALCULATIONS -->
+      <section id="page-methodology" class="dashboard-page">
+        <div class="glass-card" style="margin-bottom: 2rem;">
+          <div class="chart-header" style="margin-bottom: 1.25rem; border-bottom: 1px solid var(--border-glass); padding-bottom: 1rem;">
+            <h3>Overall Value Score Methodology (0–100)</h3>
+            <span class="pill power">System Standard</span>
+          </div>
+          <p style="font-size: 0.95rem; color: var(--text-secondary); line-height: 1.6; margin-bottom: 1.5rem;">
+            The <strong>Overall Value Score</strong> combines Chat and Code engagement into a unified returns-on-investment metric, indicating how effectively each developer utilizes their flat-fee Claude license (~$20/user/month).
+          </p>
+          
+          <div class="modal-grid-2" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem;">
+            <div class="glass-card" style="background: rgba(255, 255, 255, 0.01); border-color: rgba(37, 99, 235, 0.15); padding: 1.5rem;">
+              <h4 style="color: var(--accent-primary); font-family: 'Outfit'; font-size: 1.1rem; margin-bottom: 0.75rem;"><i class="fa-solid fa-code"></i> Developer Profile Formulas</h4>
+              <ul style="list-style: none; display: flex; flex-direction: column; gap: 0.75rem; font-size: 0.85rem; color: var(--text-secondary);">
+                <li>
+                  <strong style="color: #fff;">Has Chat + Code (Hybrid Power User):</strong><br>
+                  <code style="background: rgba(0,0,0,0.3); padding: 0.2rem 0.4rem; border-radius: 4px; color: var(--accent-primary); font-family: monospace;">(Chat Score + Code Score) / 2 + 10 Bonus Points</code> (Capped at 100).
+                </li>
+                <li>
+                  <strong style="color: #fff;">Chat-Only Active User:</strong><br>
+                  Value Score equals the calculated <code style="background: rgba(0,0,0,0.3); padding: 0.2rem 0.4rem; border-radius: 4px; color: var(--accent-success); font-family: monospace;">Chat Score</code> directly.
+                </li>
+                <li>
+                  <strong style="color: #fff;">Code-Only Active User:</strong><br>
+                  Value Score equals the calculated <code style="background: rgba(0,0,0,0.3); padding: 0.2rem 0.4rem; border-radius: 4px; color: var(--accent-warning); font-family: monospace;">Code Score</code> directly.
+                </li>
+              </ul>
+            </div>
+
+            <div class="glass-card" style="background: rgba(255, 255, 255, 0.01); border-color: rgba(16, 185, 129, 0.15); padding: 1.5rem;">
+              <h4 style="color: var(--accent-success); font-family: 'Outfit'; font-size: 1.1rem; margin-bottom: 0.75rem;"><i class="fa-solid fa-gauge-high"></i> Code Score Components (0–100)</h4>
+              <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">Normalized relative to the team's top performer (percentile distribution):</p>
+              <ul style="list-style: none; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; color: var(--text-secondary);">
+                <li>🔵 <strong style="color: #fff;">Token Volume (40%):</strong> Total tokens relative to team high.</li>
+                <li>🟢 <strong style="color: #fff;">Active Days (30%):</strong> Coding active days relative to team high.</li>
+                <li>🟡 <strong style="color: #fff;">Project Diversity (20%):</strong> Distinct repositories worked on.</li>
+                <li>🔴 <strong style="color: #fff;">Prompt Efficiency (10%):</strong> Output tokens relative to total prompt input (evaluates cache utilization).</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-card" style="margin-bottom: 2rem;">
+          <div class="chart-header" style="margin-bottom: 1.5rem;">
+            <h3>🏷️ User Cohort Categorization Rules</h3>
+          </div>
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th>User Cohort</th>
+                  <th>Automatic Classification Rule</th>
+                  <th>Management Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="pill power">🌟 Power User</span></td>
+                  <td>Active chat in the last 30 days <strong>AND</strong> meaningful Code activity (Equivalent cost &ge; $10.00 OR active days &ge; 3).</td>
+                  <td style="color: var(--accent-success); font-weight: 600;">Keep (Full Value)</td>
+                </tr>
+                <tr>
+                  <td><span class="pill chat">💬 Chat-Only Active</span></td>
+                  <td>Active chat (&ge; 5 conversations in the last 30 days) <strong>AND</strong> no meaningful Code activity.</td>
+                  <td style="color: var(--accent-primary); font-weight: 600;">Keep + Encourage Code adoption</td>
+                </tr>
+                <tr>
+                  <td><span class="pill code">⚡ Code-Only Active</span></td>
+                  <td>Meaningful Code activity (Equivalent cost &ge; $10.00 OR active days &ge; 3) <strong>AND</strong> minimal chat (&lt; 5 conversations).</td>
+                  <td style="color: var(--accent-success); font-weight: 600;">Keep (Active Developer)</td>
+                </tr>
+                <tr>
+                  <td><span class="pill low">⚠️ Low Engagement</span></td>
+                  <td>Minor activity logged in Drive, but sits below the power/active thresholds in both channels.</td>
+                  <td style="color: var(--accent-warning); font-weight: 600;">Review (Encourage training or evaluate)</td>
+                </tr>
+                <tr>
+                  <td><span class="pill inactive">❌ Truly Inactive</span></td>
+                  <td>Zero active chat sessions <strong>AND</strong> zero Code tokens logged in Google Drive.</td>
+                  <td style="color: var(--accent-danger); font-weight: 600;">Remove (Reclaim license immediately)</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="modal-grid-2">
+          <div class="glass-card" style="border-color: rgba(239, 68, 68, 0.25); padding: 1.5rem;">
+            <div class="chart-header" style="margin-bottom: 1rem;">
+              <h3 style="color: var(--accent-danger);"><i class="fa-solid fa-shield-halved"></i> 🛡️ The Handoff Safety Guard (Absolute Protection)</h3>
+            </div>
+            <p style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
+              To prevent wrongly flagging productive developers who work silently, the system enforces a strict <strong>Safety Guard</strong>.
+              <br><br>
+              Any user with <strong>Code equivalent cost &ge; $10.00</strong> OR <strong>&ge; 3 active coding days</strong> is automatically kept, protected from removal alerts, and classified into an active cohort regardless of their chat metrics.
+            </p>
+          </div>
+
+          <div class="glass-card" style="border-color: rgba(245, 158, 11, 0.25); padding: 1.5rem;">
+            <div class="chart-header" style="margin-bottom: 1rem;">
+              <h3 style="color: var(--accent-warning);"><i class="fa-solid fa-circle-dollar-to-slot"></i> 💵 Understanding Equivalent API Costs</h3>
+            </div>
+            <p style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
+              The cost figures shown on the dashboard represent the <strong>API-equivalent value</strong> (what the raw tokens would cost at commercial pay-as-you-go API rates for Sonnet, Opus, and Haiku).
+              <br><br>
+              Since Claude licenses are billed on a flat-fee subscription (~$20/user/month), these figures are indicator metrics. A total cost higher than the flat rate proves that the developer is extracting massive, high-leverage value from the seat!
+            </p>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+  </div>
+
+  <!-- 👥 Project Contributors Modal -->
+  <div class="modal-overlay" id="project-devs-modal">
+    <div class="modal-content glass-card" style="max-width: 640px;">
+      <div class="modal-header">
+        <div>
+          <h2 id="proj-modal-name" style="font-size: 1.1rem;">Project Contributors</h2>
+          <p style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.2rem;" id="proj-modal-subtitle">Active developers on this project</p>
+        </div>
+        <button class="modal-close-btn" onclick="closeProjectDevsModal()">&times;</button>
+      </div>
+      <div id="proj-devs-list" style="max-height: 480px; overflow-y: auto;">
+        <!-- Dev rows injected by JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- 🔍 Detailed User Modal Overlay -->
+  <div class="modal-overlay" id="user-detail-modal">
+    <div class="modal-content glass-card">
+      <div class="modal-header">
+        <div class="dev-cell">
+          <div class="avatar" id="modal-user-avatar">?</div>
+          <div>
+            <h2 id="modal-user-name">Developer Detail</h2>
+            <p style="font-size: 0.8rem; color: var(--text-secondary);" id="modal-user-email">email@sigmasolve.com</p>
+          </div>
+        </div>
+        <button class="modal-close-btn" onclick="closeUserDetailModal()">&times;</button>
+      </div>
+
+      <div class="modal-grid-2">
+        <div class="glass-card" style="background: rgba(255,255,255,0.02); padding: 1.25rem;">
+          <h4 style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 1rem;">User Value Performance</h4>
+          <div class="stat-grid" style="grid-template-columns: 1fr 1fr; margin-bottom: 0; gap: 1rem;">
+            <div style="text-align: center; border-right: 1px solid var(--border-glass); padding-right: 1rem;">
+              <div style="font-size: 2.25rem; font-family: 'Outfit'; font-weight: 800; color: var(--accent-primary);" id="modal-value-score">0</div>
+              <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-top: 0.25rem;">Value Score</div>
+            </div>
+            <div style="text-align: center;">
+              <div style="font-size: 2.25rem; font-family: 'Outfit'; font-weight: 800; color: var(--accent-success);" id="modal-cache-rate">0%</div>
+              <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-top: 0.25rem;">Cache Hit Rate</div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="glass-card" style="background: rgba(255,255,255,0.02); padding: 1.25rem;">
+          <h4 style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 1rem;">Summary Metrics</h4>
+          <div class="stat-grid" style="grid-template-columns: 1fr 1fr 1fr; margin-bottom: 0; gap: 0.5rem; text-align: center;">
+            <div>
+              <div style="font-size: 1.25rem; font-family: 'Outfit'; font-weight: 700; color: #fff;" id="modal-total-cost">$0</div>
+              <div style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-top: 0.25rem;">API Cost</div>
+            </div>
+            <div>
+              <div style="font-size: 1.25rem; font-family: 'Outfit'; font-weight: 700; color: #fff;" id="modal-active-days">0</div>
+              <div style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-top: 0.25rem;">Active Days</div>
+            </div>
+            <div>
+              <div style="font-size: 1.25rem; font-family: 'Outfit'; font-weight: 700; color: #fff;" id="modal-projects-count">0</div>
+              <div style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-top: 0.25rem;">Projects</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-grid-2" style="grid-template-columns: 1fr;">
+        <div class="glass-card" style="background: rgba(255,255,255,0.01);">
+          <div class="chart-header">
+            <h3>Token Utilization Breakdown</h3>
+          </div>
+          <div class="chart-canvas" id="modal-token-chart" style="height: 140px;">
+            <!-- Stacked bar chart SVG -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Adoption Tips (shown for Chat-Only users) -->
+      <div id="modal-tips-section" style="display:none; margin-top: 1rem;">
+        <div class="glass-card" style="background:rgba(16,185,129,0.05); border-left: 3px solid var(--accent-success); padding: 1.25rem;">
+          <h4 style="font-size: 0.85rem; font-weight: 700; color: var(--accent-success); margin-bottom: 0.5rem;">Chat-Only User — Adoption Opportunity</h4>
+          <p style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">This developer is actively using Claude for chat but hasn't yet adopted Claude Code for inline file editing and repo work. Encourage them to try: run <code style="background:rgba(255,255,255,0.06);padding:0.1rem 0.3rem;border-radius:3px;">claude</code> in a project folder to get started.</p>
+        </div>
+      </div>
+
+      <!-- Session Activity Timeline -->
+      <div class="glass-card" style="background: rgba(255,255,255,0.01); max-height: 280px; overflow-y: auto; margin-top: 1rem;">
+        <div class="chart-header">
+          <h3><i class="fa-solid fa-timeline" style="margin-right:0.5rem;color:var(--accent-primary);"></i>Session Activity Timeline</h3>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Project / Repo</th>
+                <th>Models Used</th>
+                <th style="text-align: right;">Tokens</th>
+                <th style="text-align: right;">Cost</th>
+              </tr>
+            </thead>
+            <tbody id="modal-sessions-table-body">
+              <!-- sessions injected by JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="modal-grid-2">
+        <div class="glass-card" style="background: rgba(255,255,255,0.01); max-height: 250px; overflow-y: auto;">
+          <div class="chart-header">
+            <h3>Model Consumption Split</h3>
+          </div>
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model Name</th>
+                  <th style="text-align: right;">Cost Contribution</th>
+                </tr>
+              </thead>
+              <tbody id="modal-models-table-body">
+                <!-- models list -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="glass-card" style="background: rgba(255,255,255,0.01); max-height: 250px; overflow-y: auto;">
+          <div class="chart-header">
+            <h3>Engaged Repositories</h3>
+          </div>
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th>Project Name</th>
+                  <th style="text-align: right;">Cost (USD)</th>
+                </tr>
+              </thead>
+              <tbody id="modal-projects-table-body">
+                <!-- projects list -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Javascript Logic Embed -->
+  <?!= include('JavaScript'); ?>
+</body>
+</html>

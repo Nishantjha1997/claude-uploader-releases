@@ -38,7 +38,7 @@ const IS_LINUX = process.platform === 'linux';
 const PLATFORM_KEY = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
 
 // -------------------- CONFIGURATION --------------------
-const VERSION = '1.9.2';
+const VERSION = '2.0.1';
 const FORCE_RUN = process.argv.includes('--force');
 
 // -------------------- SERVICE LOOP INTERVALS --------------------
@@ -329,7 +329,7 @@ function runCcusage(cmd, outFile, envOpts) {
     const child = spawn(bin, args, {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: (bin === 'node' || bin.includes('node.exe')) ? false : IS_WIN,
+      shell: (bin === 'node' || bin.includes('node.exe')) ? false : true,
     });
 
     const timer = setTimeout(() => {
@@ -337,9 +337,9 @@ function runCcusage(cmd, outFile, envOpts) {
       child.kill();
     }, CCUSAGE_TIMEOUT_MS);
 
-    let stdout = '';
+    const outStream = fs.createWriteStream(outFile);
+    child.stdout.pipe(outStream);
     let stderr = '';
-    child.stdout.on('data', d => { stdout += d; });
     child.stderr.on('data', d => { stderr += d; });
     child.on('error', err => {
       clearTimeout(timer);
@@ -362,12 +362,7 @@ function runCcusage(cmd, outFile, envOpts) {
         reject(new Error(`${ERR.CCUSAGE_FAILED}: ccusage exited ${code}; ${detail}`));
         return;
       }
-      try {
-        fs.writeFileSync(outFile, stdout);
-        resolve();
-      } catch (e) {
-        reject(e);
-      }
+      resolve();
     });
   });
 }
@@ -417,13 +412,15 @@ function sendPingOnce(payload) {
       let body = '';
       res.on('data', c => { body += c; });
       res.on('end', () => {
-        // GAS web apps redirect the POST response; follow once to get the actual JSON body.
         if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-          https.get(res.headers.location, r2 => {
+          const r2Options = { timeout: PING_TIMEOUT_MS };
+          const r2Req = https.get(res.headers.location, r2Options, r2 => {
             let b2 = '';
             r2.on('data', c => b2 += c);
             r2.on('end', () => resolve(checkBody(res.statusCode, b2)));
-          }).on('error', () => resolve({ ok: true, status: res.statusCode, body }));
+          });
+          r2Req.on('error', () => resolve({ ok: true, status: res.statusCode, body }));
+          r2Req.on('timeout', () => { r2Req.destroy(); resolve({ ok: true, status: res.statusCode, body }); });
           return;
         }
         resolve(checkBody(res.statusCode, body));
@@ -917,6 +914,14 @@ function setupTaskWindows() {
       <Enabled>true</Enabled>
       <Delay>PT2M</Delay>
     </BootTrigger>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT15M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2020-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -1008,6 +1013,7 @@ function setupTaskLinux() {
   // Service loop handles all scheduling internally — just need a single @reboot entry.
   // 2-minute delay gives the network time to come up before the first poll.
   const bootLine = `@reboot sleep 120 && "${bin}" # ClaudeUsageUploader`;
+  const cronLine = `*/15 * * * * pgrep -f "ClaudeUsageUploader" >/dev/null || "${bin}" # ClaudeUsageUploader`;
 
   let currentCrontab = '';
   try { currentCrontab = run('crontab -l'); } catch {}
@@ -1018,14 +1024,14 @@ function setupTaskLinux() {
     .join('\n')
     .trimEnd();
 
-  const newCrontab = (cleaned ? cleaned + '\n' : '') + bootLine + '\n';
+  const newCrontab = (cleaned ? cleaned + '\n' : '') + bootLine + '\n' + cronLine + '\n';
 
   const tmpFile = path.join(os.tmpdir(), 'claude-crontab.txt');
   fs.writeFileSync(tmpFile, newCrontab);
   run(`crontab "${tmpFile}"`);
   try { fs.unlinkSync(tmpFile); } catch {}
 
-  log('Linux crontab entries added (@reboot + daily 09:00)');
+  log('Linux crontab entries added (@reboot + 15-minute watchdog)');
 }
 
 // -------------------- WEEK TRACKING --------------------
@@ -1122,27 +1128,72 @@ function ensureCCUsage() {
     ? { env: { ...process.env, PATH: `${globalNodeDir}${path.delimiter}${process.env.PATH}` } }
     : {};
 
-  try {
-    run('ccusage --help', envOpts);
-    log('ccusage OK');
-  } catch {
-    log('Installing ccusage...');
-    run(`${getNpmCmd()} install -g ccusage`, envOpts);
-    log('ccusage installed');
+  const resolveCcusageJs = (baseDir) => {
+    const paths = [
+      path.join(baseDir, 'dist', 'cli.js'),
+      path.join(baseDir, 'dist', 'index.js')
+    ];
+    for (const p of paths) {
+      if (fs.existsSync(p)) return p;
+    }
+    return null;
+  };
+
+  // --- STRATEGY 1: Check local install in CONFIG_DIR (no admin rights needed) ---
+  const localCcusageDir = path.join(CONFIG_DIR, 'node_modules', 'ccusage');
+  const localCcusageJs = resolveCcusageJs(localCcusageDir);
+  if (localCcusageJs) {
+    globalCcusageJsPath = localCcusageJs;
+    log(`ccusage OK (local): ${localCcusageJs}`);
+    return;
   }
 
-  // Find the JS entry point to bypass .cmd wrapper on Windows (avoids EPERM)
+  // --- STRATEGY 2: Try global ccusage in PATH ---
   try {
-    if (IS_WIN) {
+    run('ccusage --help', envOpts);
+    log('ccusage OK (global PATH)');
+    // Try to resolve the JS entry point to run via node directly (bypasses shell wrapping and PATH issues under launchd/cron)
+    try {
       const npmRoot = execSync('npm root -g', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      const jsPath = path.join(npmRoot, 'ccusage', 'dist', 'index.js');
-      if (fs.existsSync(jsPath)) {
+      const jsPath = resolveCcusageJs(path.join(npmRoot, 'ccusage'));
+      if (jsPath) {
         globalCcusageJsPath = jsPath;
         log(`Stealth mode: using ccusage entry point at ${jsPath}`);
       }
+    } catch (e) {
+      log(`Could not resolve global stealth path: ${e.message}`);
     }
-  } catch (e) {
-    log(`Could not resolve stealth path: ${e.message}`);
+    return;
+  } catch {
+    log('ccusage not found globally, will install locally...');
+  }
+
+  // --- STRATEGY 3: Install locally into CONFIG_DIR (no sudo / admin needed) ---
+  try {
+    if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    log(`Installing ccusage locally into ${CONFIG_DIR} ...`);
+    const npmPrefix = `--prefix "${CONFIG_DIR}"`;
+    run(`${getNpmCmd()} install ${npmPrefix} ccusage`, envOpts);
+    const postInstallJs = resolveCcusageJs(localCcusageDir);
+    if (postInstallJs) {
+      globalCcusageJsPath = postInstallJs;
+      log(`ccusage installed locally: ${postInstallJs}`);
+      return;
+    }
+    throw new Error('Local install succeeded but entry point not found at expected path');
+  } catch (localErr) {
+    log(`Local install failed: ${localErr.message}`);
+    // --- STRATEGY 4: Last-resort global install (may need admin rights) ---
+    try {
+      log('Attempting global install as last resort...');
+      run(`${getNpmCmd()} install -g ccusage`, envOpts);
+      log('ccusage installed globally');
+    } catch (globalErr) {
+      throw new Error(
+        `ccusage setup failed. Local error: ${localErr.message}. Global error: ${globalErr.message}. ` +
+        `Try running: npm install --prefix "${CONFIG_DIR}" ccusage`
+      );
+    }
   }
 }
 
@@ -1318,10 +1369,22 @@ async function upload(name, sessionFile, dailyFile) {
     ? `${sanitizedFirst}_${sanitizedLast}_claude_daily.json`
     : `${sanitizedFirst}_claude_daily.json`;
 
-  // We overwrite the existing file so it doesn't clutter the drive.
-  // The filename stays identical, but the content updates.
-  const sessionFileId = await uploadOrUpdateFile(sessionFile, sessionName);
-  const dailyFileId   = await uploadOrUpdateFile(dailyFile,   dailyName);
+  log(`Phase 1: Uploading session report (${sessionName})...`);
+  let sessionFileId = null;
+  try {
+    sessionFileId = await uploadOrUpdateFile(sessionFile, sessionName);
+  } catch (err) {
+    log(`Warning: Session report upload failed: ${err.message}`);
+  }
+
+  log(`Phase 2: Uploading daily report (${dailyName})...`);
+  let dailyFileId = null;
+  try {
+    dailyFileId = await uploadOrUpdateFile(dailyFile, dailyName);
+  } catch (err) {
+    log(`Warning: Daily report upload failed: ${err.message}`);
+  }
+
   return { sessionFileId, dailyFileId };
 }
 
@@ -1349,6 +1412,9 @@ async function runGenerateAndUpload(cfg, source) {
     } catch (e) {
       log(`Pause guard check failed: ${e.message} \u2014 continuing with upload`);
     }
+
+    await sendPing(cfg.name, 'POLLING_ACK', `Trigger received — starting pipeline`);
+    log(`POLLING_ACK sent (${source})`);
 
     validateSetup();
     ensureNpm();
@@ -1551,6 +1617,14 @@ async function serviceLoop(cfg) {
         const freshCfg = loadConfig() || cfg;
         await runGenerateAndUpload(freshCfg, 'admin');
         cfg = loadConfig() || cfg;
+      } else if (trigger.type === 'UPDATE') {
+        await sendPing(cfg.name, 'UPDATE_START', 'Checking for hot-patch update...', pingExtra({ nextPollAt }));
+        log('Update trigger received. Checking for updates...');
+        const isUpdating = await checkForUpdates(cfg.name);
+        if (isUpdating) {
+          log('Update applied — exiting for replacement by launcher');
+          process.exit(0);
+        }
       } else {
         await sendPing(cfg.name, 'WAITING', `v${VERSION} idle`, pingExtra({ nextPollAt }));
       }

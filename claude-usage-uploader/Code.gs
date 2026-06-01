@@ -73,12 +73,24 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  ensureExpectedDevelopersSheet();
-  installPruneTrigger();  // idempotent — no-ops if trigger already registered
+  maybeRunOneTimeInit_();
   return HtmlService.createTemplateFromFile('Index')
       .evaluate()
       .setTitle('Compliance Dashboard')
       .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// Runs sheet setup + trigger install only once per script version, not on every page load.
+// Keyed by a version string — bump the value to force a re-run after major schema changes.
+var INIT_VERSION = 'v2';
+function maybeRunOneTimeInit_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('initDone') === INIT_VERSION) return; // already done
+  ensureExpectedDevelopersSheet();
+  ensureRegisteredDevelopersSheet();
+  installPruneTrigger();
+  cleanupSheets_();
+  props.setProperty('initDone', INIT_VERSION);
 }
 
 function include(filename) {
@@ -86,6 +98,37 @@ function include(filename) {
 }
 
 // -------------------- SHEET HELPERS --------------------
+
+var REQUIRED_SHEETS = [
+  'ComplianceLog', 'HeartbeatLog', 'ExpectedDevelopers',
+  'RegisteredDevelopers', 'PausedDevelopers', 'TriggerQueue',
+  'AppLog', 'Settings'
+];
+
+function cleanupSheets_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var all = ss.getSheets();
+  var removed = 0;
+  all.forEach(function(s) {
+    if (REQUIRED_SHEETS.indexOf(s.getName()) === -1) {
+      if (ss.getSheets().length > 1) {
+        try { ss.deleteSheet(s); removed++; } catch(e) {}
+      }
+    }
+  });
+  if (removed > 0) { log_('Cleanup: removed ' + removed + ' unused sheet(s)'); invalidateCache_(); }
+}
+
+function ensureRegisteredDevelopersSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('RegisteredDevelopers');
+  if (!sheet) {
+    sheet = ss.insertSheet('RegisteredDevelopers');
+    sheet.appendRow(['Name', 'RegisteredAt']);
+    sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
+  }
+  return sheet;
+}
 
 function ensureExpectedDevelopersSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -117,19 +160,32 @@ function getCurrentWeekStart_() {
   return Utilities.formatDate(monday, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
 
+function getWeekHeaders_(n) {
+  var headers = [];
+  var curr = getCurrentWeekStart_();
+  for (var i = 0; i < n; i++) {
+    headers.push(curr);
+    var d = new Date(curr + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() - 7);
+    curr = Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
+  }
+  return headers;
+}
+
 function ensureTriggerQueue() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('TriggerQueue');
   if (!sheet) {
     sheet = ss.insertSheet('TriggerQueue');
-    sheet.appendRow(['Name', 'QueuedAt', 'QueuedBy', 'Type']);
-    sheet.getRange(1, 1, 1, 4).setFontWeight('bold');
+    sheet.appendRow(['Name', 'QueuedAt', 'QueuedBy', 'Type', 'NotBefore']);
+    sheet.getRange(1, 1, 1, 5).setFontWeight('bold');
   } else {
-    // Upgrade: add Type column if missing
     var lastCol = sheet.getLastColumn();
     if (lastCol < 4) {
-      sheet.getRange(1, 4).setValue('Type');
-      sheet.getRange(1, 4).setFontWeight('bold');
+      sheet.getRange(1, 4).setValue('Type').setFontWeight('bold');
+    }
+    if (lastCol < 5) {
+      sheet.getRange(1, 5).setValue('NotBefore').setFontWeight('bold');
     }
   }
   return sheet;
@@ -156,7 +212,7 @@ function adminQueueTrigger(name, type) {
     var who = '';
     try { who = Session.getActiveUser().getEmail(); } catch (e) { who = 'admin'; }
 
-    sheet.appendRow([name.trim(), new Date().toISOString(), who, type]);
+    sheet.appendRow([name.trim(), new Date().toISOString(), who, type, new Date().toISOString()]);
     log_('TriggerQueue: queued ' + type + ' for ' + name + ' by ' + who);
     invalidateCache_();
     return { success: true };
@@ -181,13 +237,15 @@ function adminQueueTriggerBatch(names) {
     }
     var who = '';
     try { who = Session.getActiveUser().getEmail(); } catch (e) { who = 'admin'; }
-    var queued = [], skipped = [], now = new Date().toISOString();
+    var queued = [], skipped = [], baseTime = Date.now();
     names.forEach(function(name) {
       var key = String(name).trim().toLowerCase();
       if (alreadyQueued[key]) {
         skipped.push(name);
       } else {
-        sheet.appendRow([name.trim(), now, who, 'FORCE_RUN']);
+        // Stagger each trigger by 60s to prevent simultaneous GAS executions
+        var notBefore = new Date(baseTime + queued.length * 60000).toISOString();
+        sheet.appendRow([name.trim(), new Date().toISOString(), who, 'FORCE_RUN', notBefore]);
         queued.push(name);
         alreadyQueued[key] = true;
       }
@@ -226,7 +284,7 @@ function adminQueuePing(name) {
     var who = '';
     try { who = Session.getActiveUser().getEmail(); } catch (e) { who = 'admin'; }
 
-    sheet.appendRow([name.trim(), new Date().toISOString(), who, 'PING']);
+    sheet.appendRow([name.trim(), new Date().toISOString(), who, 'PING', new Date().toISOString()]);
     log_('TriggerQueue: queued PING for ' + name + ' by ' + who);
     invalidateCache_();
     return { success: true };
@@ -238,22 +296,22 @@ function adminQueuePing(name) {
 function checkAndClearTrigger(name) {
   if (!name) return { triggered: false, paused: false };
 
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  // --- FAST PATH: serve all three pre-checks from CacheService.
+  // 99% of calls (idle developers) take this branch with ZERO spreadsheet reads.
+  var pausedSet       = getPausedSetCached_();
+  var uploadFrequency = getSettingCached_('uploadFrequency', 'weekly');
+  var paused          = !!pausedSet[name.trim().toLowerCase()];
 
-  // Lock-free reads: pause state and settings are safe to read outside a lock.
-  var paused = isDeveloperPaused_(ss, name);
-  var uploadFrequency = getSetting_('uploadFrequency', 'weekly');
-
-  // --- FAST PATH (no lock) ---
-  // Read the queue speculatively. If the developer has no entry we're done — 99% of calls
-  // take this branch and never touch the global lock at all.
-  var qSheet = ss.getSheetByName('TriggerQueue');
-  if (!qSheet) return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
-
-  var quickData = qSheet.getDataRange().getValues();
+  // Trigger-queue check — served from a 15-second cache.
+  // Only a real trigger event (very rare) causes a cache miss here.
+  var queueRows = getTriggerQueueRowsCached_();
+  var now = new Date();
   var candidateFound = false;
-  for (var k = 1; k < quickData.length; k++) {
-    if (String(quickData[k][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
+  var nameLower = name.trim().toLowerCase();
+  for (var k = 0; k < queueRows.length; k++) {
+    if (queueRows[k].name.toLowerCase() === nameLower) {
+      var nb = queueRows[k].notBefore;
+      if (nb && new Date(nb) > now) continue; // not yet ready
       candidateFound = true;
       break;
     }
@@ -263,8 +321,12 @@ function checkAndClearTrigger(name) {
   }
 
   // --- SAFE PATH (exclusive lock) ---
-  // A row was spotted; acquire the lock and re-read before mutating so concurrent requests
-  // cannot double-consume the same trigger entry.
+  // A row was spotted in cache; acquire the lock and re-read from the sheet before
+  // mutating so concurrent requests cannot double-consume the same trigger entry.
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var qSheet = ss.getSheetByName('TriggerQueue');
+  if (!qSheet) return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
+
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
     log_('checkAndClearTrigger: lock timeout for ' + name);
@@ -272,8 +334,11 @@ function checkAndClearTrigger(name) {
   }
   try {
     var data = qSheet.getDataRange().getValues();
+    var now2 = new Date();
     for (var i = 1; i < data.length; i++) {
-      if (String(data[i][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
+      if (String(data[i][0]).trim().toLowerCase() === nameLower) {
+        var nb2 = data[i][4] ? String(data[i][4]).trim() : '';
+        if (nb2 && new Date(nb2) > now2) continue; // not yet ready
         var triggerType = data[i][3] ? String(data[i][3]).trim() : 'FORCE_RUN';
         qSheet.deleteRow(i + 1);
         SpreadsheetApp.flush();  // commit immediately so concurrent readers see it gone
@@ -282,7 +347,7 @@ function checkAndClearTrigger(name) {
         return { triggered: true, type: triggerType, paused: paused, uploadFrequency: uploadFrequency };
       }
     }
-    // Trigger was claimed by a concurrent request between the fast-check and lock acquisition.
+    // Trigger was claimed by a concurrent request between the cache-check and lock acquisition.
     return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
   } finally {
     lock.releaseLock();
@@ -302,7 +367,8 @@ function adminGetTriggerQueue() {
         name: String(data[i][0]).trim(),
         queuedAt: data[i][1] ? String(data[i][1]) : '',
         queuedBy: data[i][2] ? String(data[i][2]) : '',
-        type: data[i][3] ? String(data[i][3]).trim() : 'FORCE_RUN'
+        type: data[i][3] ? String(data[i][3]).trim() : 'FORCE_RUN',
+        notBefore: data[i][4] ? String(data[i][4]).trim() : ''
       });
     }
   }
@@ -369,8 +435,8 @@ function getDeveloperLogs(name, limit) {
   function extractLogs(sheetName) {
     var logSheet = ss.getSheetByName(sheetName);
     if (!logSheet) return;
-    var data = logSheet.getDataRange().getValues();
-    for (var i = data.length - 1; i >= 1; i--) {
+    var data = getRecentLogRows_(logSheet, 300);
+    for (var i = data.length - 1; i >= 0; i--) {
       var row = data[i];
       if (!row[0]) continue;
       if (String(row[1]).trim().toLowerCase() !== name.trim().toLowerCase()) continue;
@@ -409,12 +475,9 @@ function getActiveUsers() {
   function processSheet(sheetName, boundedRecent) {
     var sheet = ss.getSheetByName(sheetName);
     if (!sheet) return;
-    var data = sheet.getDataRange().getValues();
-    var startIndex = 1;
-    if (boundedRecent && data.length > 500) {
-      startIndex = data.length - 500;
-    }
-    for (var i = startIndex; i < data.length; i++) {
+    var maxRows = boundedRecent ? 500 : 1500;
+    var data = getRecentLogRows_(sheet, maxRows);
+    for (var i = 0; i < data.length; i++) {
       var row = data[i];
       if (!row[0]) continue;
 
@@ -438,7 +501,8 @@ function getActiveUsers() {
       };
 
       var u = userMap[name];
-      if (!u.lastSeen || new Date(ts) > new Date(u.lastSeen)) u.lastSeen = ts;
+      var isNewer = !u.lastSeen || new Date(ts) > new Date(u.lastSeen);
+      if (isNewer) u.lastSeen = ts;
 
       if (status === 'HEARTBEAT' || status === 'WAITING' || status === 'POLLING_ACK' || status === 'PAUSED' || status === 'WAITING_PAUSED') {
         if (!u.lastHeartbeat || new Date(ts) > new Date(u.lastHeartbeat)) u.lastHeartbeat = ts;
@@ -456,10 +520,10 @@ function getActiveUsers() {
       // Track version and last update check (columns 7 and 8)
       var rowVersion = row[6] ? String(row[6]).trim() : '';
       var rowUpdateCheck = row[7] ? String(row[7]).trim() : '';
-      if (rowVersion && (!u.version || new Date(ts) > new Date(u.lastSeen || 0))) {
+      if (rowVersion && (!u.version || isNewer)) {
         u.version = rowVersion;
       }
-      if (rowUpdateCheck && rowUpdateCheck !== 'never' && (!u.lastUpdateCheck || new Date(ts) > new Date(u.lastSeen || 0))) {
+      if (rowUpdateCheck && rowUpdateCheck !== 'never' && (!u.lastUpdateCheck || isNewer)) {
         u.lastUpdateCheck = rowUpdateCheck;
       }
     }
@@ -504,29 +568,195 @@ function getActiveUsers() {
 // -------------------- DASHBOARD DATA --------------------
 
 function invalidateCache_() {
-  CacheService.getScriptCache().remove('dashboardData');
+  var c = CacheService.getScriptCache();
+  chunkedCacheRemove(c, 'dashboardData');
+  c.remove('pausedSet');
+  c.remove('triggerQueueRows');
+  c.remove('setting_uploadFrequency');
+  c.put('lastModified', String(Date.now()), 3600);
+}
+
+// -------------------- CACHED FAST-READ HELPERS --------------------
+// These replace direct sheet reads in the hot path (checkAndClearTrigger).
+// Every mutation calls invalidateCache_() which flushes these keys immediately.
+
+var CACHE_TTL_SETTINGS     = 600;  // settings change rarely — 10 min
+var CACHE_TTL_PAUSED       = 120;  // paused state — 2 min
+var CACHE_TTL_TRIGGERQUEUE = 15;   // trigger queue — 15 seconds (must stay fresh)
+
+function getSettingCached_(key, defaultVal) {
+  var c = CacheService.getScriptCache();
+  var cacheKey = 'setting_' + key;
+  var cached = c.get(cacheKey);
+  if (cached !== null) return cached;
+  
+  var lock = LockService.getScriptLock();
+  if (lock.tryLock(5000)) {
+    try {
+      cached = c.get(cacheKey);
+      if (cached !== null) return cached;
+      var val = getSetting_(key, defaultVal);
+      c.put(cacheKey, String(val), CACHE_TTL_SETTINGS);
+      return val;
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  return defaultVal;
+}
+
+// Returns a plain set {lowerCaseName: true} for O(1) lookup.
+function getPausedSetCached_() {
+  var c = CacheService.getScriptCache();
+  var cached = c.get('pausedSet');
+  if (cached !== null) {
+    try { return JSON.parse(cached); } catch(e) {}
+  }
+  var lock = LockService.getScriptLock();
+  if (lock.tryLock(5000)) {
+    try {
+      cached = c.get('pausedSet');
+      if (cached !== null) {
+        try { return JSON.parse(cached); } catch(e) {}
+      }
+      var map = getPausedDevelopersMap_();
+      var set = {};
+      Object.keys(map).forEach(function(k) { set[k] = true; });
+      try { c.put('pausedSet', JSON.stringify(set), CACHE_TTL_PAUSED); } catch(e) {}
+      return set;
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  return {};
+}
+
+// Returns serialised trigger-queue rows so doGet/checkAndClearTrigger
+// can check for pending triggers without opening the spreadsheet at all.
+function getTriggerQueueRowsCached_() {
+  var c = CacheService.getScriptCache();
+  var cached = c.get('triggerQueueRows');
+  if (cached !== null) {
+    try { return JSON.parse(cached); } catch(e) {}
+  }
+  var lock = LockService.getScriptLock();
+  if (lock.tryLock(5000)) {
+    try {
+      cached = c.get('triggerQueueRows');
+      if (cached !== null) {
+        try { return JSON.parse(cached); } catch(e) {}
+      }
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      var sheet = ss.getSheetByName('TriggerQueue');
+      if (!sheet) {
+        try { c.put('triggerQueueRows', '[]', CACHE_TTL_TRIGGERQUEUE); } catch(e) {}
+        return [];
+      }
+      var data = sheet.getDataRange().getValues();
+      var rows = [];
+      for (var i = 1; i < data.length; i++) {
+        if (data[i][0]) rows.push({
+          name:      String(data[i][0]).trim(),
+          type:      data[i][3] ? String(data[i][3]).trim() : 'FORCE_RUN',
+          notBefore: data[i][4] ? String(data[i][4]).trim() : ''
+        });
+      }
+      try { c.put('triggerQueueRows', JSON.stringify(rows), CACHE_TTL_TRIGGERQUEUE); } catch(e) {}
+      return rows;
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  return [];
+}
+
+// Lightweight endpoint — returns only a change timestamp.
+// The dashboard polls this every 5s so new registrations surface immediately
+// without doing a full getDashboardData fetch every 5s.
+function getLastModified() {
+  var ts = CacheService.getScriptCache().get('lastModified');
+  return { ts: ts ? parseInt(ts, 10) : 0 };
+}
+
+function chunkedCachePut(cache, key, stringData, expiration) {
+  var MAX_CHUNK_SIZE = 50000;
+  var chunks = Math.ceil(stringData.length / MAX_CHUNK_SIZE);
+  if (chunks > 1) {
+    for (var i = 0; i < chunks; i++) {
+      cache.put(key + '_chunk_' + i, stringData.substring(i * MAX_CHUNK_SIZE, (i + 1) * MAX_CHUNK_SIZE), expiration);
+    }
+    cache.put(key + '_chunks', String(chunks), expiration);
+  } else {
+    cache.put(key, stringData, expiration);
+    cache.remove(key + '_chunks');
+  }
+}
+
+function chunkedCacheGet(cache, key) {
+  var chunksStr = cache.get(key + '_chunks');
+  if (chunksStr) {
+    var numChunks = parseInt(chunksStr, 10);
+    var data = '';
+    for (var i = 0; i < numChunks; i++) {
+      var chunk = cache.get(key + '_chunk_' + i);
+      if (!chunk) return null; // Incomplete
+      data += chunk;
+    }
+    return data;
+  }
+  return cache.get(key);
+}
+
+function chunkedCacheRemove(cache, key) {
+  var chunksStr = cache.get(key + '_chunks');
+  if (chunksStr) {
+    var numChunks = parseInt(chunksStr, 10);
+    for (var i = 0; i < numChunks; i++) {
+      cache.remove(key + '_chunk_' + i);
+    }
+    cache.remove(key + '_chunks');
+  }
+  cache.remove(key);
 }
 
 function getDashboardData() {
   var cache = CacheService.getScriptCache();
-  var cached = cache.get('dashboardData');
+  var cached = chunkedCacheGet(cache, 'dashboardData');
   if (cached) {
     try { return JSON.parse(cached); } catch(e) {}
   }
-  var data = getDashboardData_uncached_();
+  
+  var lock = LockService.getScriptLock();
+  var locked = false;
   try {
-    cache.put('dashboardData', JSON.stringify(data), 300); // 5 mins
-  } catch(e) {
-    // Data too large for cache — skip caching, return fresh each time
-    log_('Cache skip: data too large (' + e.message + ')');
+    lock.waitLock(10000);
+    locked = true;
+  } catch (e) {
+    throw new Error("Server is generating dashboard data. Please retry in a few moments.");
   }
-  return data;
+  
+  try {
+    cached = chunkedCacheGet(cache, 'dashboardData');
+    if (cached) {
+      try { return JSON.parse(cached); } catch(e) {}
+    }
+    
+    var data = getDashboardData_uncached_();
+    try {
+      chunkedCachePut(cache, 'dashboardData', JSON.stringify(data), 300); // 5 mins
+    } catch(e) {
+      log_('Cache skip: data too large (' + e.message + ')');
+    }
+    return data;
+  } finally {
+    if (locked) lock.releaseLock();
+  }
 }
 
 function getDashboardData_uncached_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  // 1. Expected Developers
+  // 1. Expected Developers (pending onboarding — haven't registered yet)
   var expectedSheet = ss.getSheetByName('ExpectedDevelopers');
   var expectedData = expectedSheet ? expectedSheet.getDataRange().getValues() : [];
   var expectedDevelopers = [];
@@ -534,13 +764,32 @@ function getDashboardData_uncached_() {
     if (expectedData[i][0]) expectedDevelopers.push(String(expectedData[i][0]).trim());
   }
 
+  // 1b. Registered Developers (active — compliance is tracked against this list)
+  ensureRegisteredDevelopersSheet();
+  var regSheet_ = ss.getSheetByName('RegisteredDevelopers');
+  var regData_ = regSheet_ ? regSheet_.getDataRange().getValues() : [];
+  var registeredNames = [];
+  for (var ri_ = 1; ri_ < regData_.length; ri_++) {
+    if (regData_[ri_][0]) registeredNames.push(String(regData_[ri_][0]).trim());
+  }
+
   // 2. Compliance Logs — read all but only keep recent weeks to stay under size limit
   var logSheet = ss.getSheetByName('ComplianceLog');
   var allLogs = [];
   var registeredMap = {};
+
+  // 2a. Compliance grid accumulators (8-week history per registered developer)
+  var weekHeaders = getWeekHeaders_(8);
+  var weekHeaderSet = {};
+  weekHeaders.forEach(function(w) { weekHeaderSet[w] = true; });
+  var complianceGrid = {};
+  registeredNames.forEach(function(n) { complianceGrid[n] = {}; });
+  var recentUploadsAll = [];
+  var STATUS_RANK = { 'SUCCESS': 2, 'FAILURE': 1 };
+
   if (logSheet) {
-    var logData = logSheet.getDataRange().getValues();
-    for (var i = 1; i < logData.length; i++) {
+    var logData = getRecentLogRows_(logSheet, 3000);
+    for (var i = 0; i < logData.length; i++) {
       var row = logData[i];
       if (!row[0]) continue;
 
@@ -569,6 +818,31 @@ function getDashboardData_uncached_() {
         error: errMsg
       });
 
+      // 8-week compliance grid (SUCCESS > FAILURE > null precedence)
+      if (weekHeaderSet[ws]) {
+        if (!complianceGrid[name]) complianceGrid[name] = {};
+        var existingStatus = complianceGrid[name][ws];
+        var incomingRank = STATUS_RANK[status] || 0;
+        var existingRank = STATUS_RANK[existingStatus] || 0;
+        if (incomingRank > existingRank) {
+          complianceGrid[name][ws] = status;
+        } else if (!existingStatus) {
+          complianceGrid[name][ws] = null;
+        }
+      }
+
+      // Recent uploads log (SUCCESS and FAILURE only)
+      if (status === 'SUCCESS' || status === 'FAILURE') {
+        recentUploadsAll.push({
+          name: name,
+          timestamp: ts,
+          weekStart: ws,
+          status: status,
+          version: row[6] ? String(row[6]).trim() : '',
+          message: errMsg
+        });
+      }
+
       // Track registered developers across ALL logs (not just recent)
       if (status === 'REGISTERED') {
         if (!registeredMap[name] || new Date(ts) < new Date(registeredMap[name])) {
@@ -578,6 +852,10 @@ function getDashboardData_uncached_() {
     }
   }
 
+  // 2b. Sort recentUploads newest-first, keep top 30
+  recentUploadsAll.sort(function(a, b) { return new Date(b.timestamp) - new Date(a.timestamp); });
+  var recentUploads = recentUploadsAll.slice(0, 30);
+
   // 3. Distinct weeks (newest first) — keep only most recent 8 weeks for dashboard
   var weeksMap = {};
   allLogs.forEach(function(log) { if (log.weekStart) weeksMap[log.weekStart] = true; });
@@ -585,12 +863,12 @@ function getDashboardData_uncached_() {
   var recentWeeksSet = {};
   weeks.forEach(function(w) { recentWeeksSet[w] = true; });
 
-  // 4. Calculate complianceByWeek on the server to avoid sending all logs
+  // 4. Calculate complianceByWeek based on RegisteredDevelopers (active users)
   var complianceByWeek = {};
   weeks.forEach(function(w) {
     complianceByWeek[w] = { expected: 0, reported: 0, failed: 0, pending: 0, details: [] };
     var devStatus = {};
-    expectedDevelopers.forEach(function(n) { devStatus[n] = null; });
+    registeredNames.forEach(function(n) { devStatus[n] = null; });
     
     var weekLogs = allLogs.filter(function(l) { return l.weekStart === w; });
     weekLogs.sort(function(a, b) { return new Date(b.timestamp) - new Date(a.timestamp); });
@@ -619,9 +897,9 @@ function getDashboardData_uncached_() {
     });
   });
 
-  // 5. Registered developers
-  var registeredDevelopers = Object.keys(registeredMap).map(function(name) {
-    return { name: name, date: registeredMap[name] };
+  // 5. Registered developers list (from RegisteredDevelopers sheet, with registration date)
+  var registeredDevelopers = regData_.slice(1).filter(function(r){ return r[0]; }).map(function(r) {
+    return { name: String(r[0]).trim(), registeredAt: r[1] ? String(r[1]).trim() : '' };
   });
 
   // 6. Active users with heartbeat / last-seen / pong data
@@ -642,8 +920,208 @@ function getDashboardData_uncached_() {
     triggerQueue: triggerQueue,
     currentWeek: getCurrentWeekStart_(),
     pausedDevelopers: pausedDevelopers,
-    uploadFrequency: getSetting_('uploadFrequency', 'weekly')
+    uploadFrequency: getSetting_('uploadFrequency', 'weekly'),
+    complianceGrid: complianceGrid,
+    recentUploads: recentUploads,
+    weekHeaders: weekHeaders
   };
+}
+
+// -------------------- CSV LOG EXPORT --------------------
+// Returns the full ComplianceLog as a raw CSV string.
+// Only SUCCESS and FAILURE rows are exported (all weeks, not just recent).
+function getComplianceLogCSV() {
+  requireAdmin_();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('ComplianceLog');
+  if (!sheet) return 'Timestamp,Developer Name,Week Start,Status,Error Message,Version\n';
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return 'Timestamp,Developer Name,Week Start,Status,Error Message,Version\n';
+
+  var data = sheet.getRange(1, 1, lastRow, Math.max(sheet.getLastColumn(), 8)).getValues();
+  var lines = ['Timestamp,Developer Name,Week Start,Status,Error Message,Version'];
+
+  function csvCell(val) {
+    var s = String(val === null || val === undefined ? '' : val);
+    // Dates
+    if (val && typeof val.toISOString === 'function') s = val.toISOString();
+    // Escape quotes and wrap in quotes if necessary
+    if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
+      s = '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    if (!row[0]) continue;
+    var status = String(row[3] || '').trim().toUpperCase();
+    // Export all meaningful events — SUCCESS, FAILURE, GENERATE_START, UPLOAD_START, etc.
+    // Skip pure noise (HEARTBEAT / WAITING) to keep the CSV manageable
+    if (status === 'HEARTBEAT' || status === 'WAITING') continue;
+    lines.push([
+      csvCell(row[0]),
+      csvCell(row[1]),
+      csvCell(row[2]),
+      csvCell(row[3]),
+      csvCell(row[4]),
+      csvCell(row[6]) // Version column
+    ].join(','));
+  }
+  return lines.join('\r\n');
+}
+
+// -------------------- GLOBAL QUEUE STATUS --------------------
+// Returns a summary of pending + in-progress runs for the dashboard status bar.
+// Designed to be lightweight — does NOT do a full getDashboardData rebuild.
+function getGlobalQueueStatus() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1. Pending triggers
+  var pending = adminGetTriggerQueue();
+
+  // 2. Currently in-progress (last 30 min, terminal not yet received)
+  var pendingNames = {};
+  pending.forEach(function(p) { pendingNames[p.name.toLowerCase()] = true; });
+  var inProgress = getInProgressRuns_(ss, pendingNames);
+
+  // 3. Completed runs this session — scan last 30 min of ComplianceLog for SUCCESS/FAILURE
+  var logSheet = ss.getSheetByName('ComplianceLog');
+  var recentCompleted = [];
+  if (logSheet) {
+    var cutoff = new Date(Date.now() - 30 * 60 * 1000);
+    var rows = getRecentLogRows_(logSheet, 300);
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (!row[0]) continue;
+      var ts = row[0];
+      if (ts && typeof ts.getTime === 'function') ts = ts.toISOString(); else ts = String(ts);
+      if (new Date(ts) < cutoff) continue;
+      var status = String(row[3] || '').trim().toUpperCase();
+      if (status !== 'SUCCESS' && status !== 'FAILURE') continue;
+      var name = String(row[1] || '').trim();
+      if (!name) continue;
+      recentCompleted.push({
+        name: name,
+        status: status,
+        message: String(row[4] || ''),
+        timestamp: ts
+      });
+    }
+    // Deduplicate: keep only the most recent terminal result per developer
+    var seenNames = {};
+    recentCompleted = recentCompleted.reverse().filter(function(r) {
+      if (seenNames[r.name.toLowerCase()]) return false;
+      seenNames[r.name.toLowerCase()] = true;
+      return true;
+    }).reverse();
+  }
+
+  return {
+    pending: pending,
+    inProgress: inProgress.map(function(r) { return { name: r.name }; }),
+    recentCompleted: recentCompleted,
+    totalQueued: pending.length,
+    inProgressCount: inProgress.length,
+    completedCount: recentCompleted.length
+  };
+}
+
+// -------------------- SMART RETRY (SERVER-SIDE) --------------------
+// Called from doPost() on every HEARTBEAT/WAITING ping.
+// Guards:
+//   1. User must have a FAILURE this week with no subsequent SUCCESS.
+//   2. No trigger already queued for this user.
+//   3. At least 4 hours since last smart retry (PropertiesService cooldown key).
+//   4. At most 3 smart retries per user per week (weekly counter in Properties).
+function checkAndTriggerSmartRetry_(name) {
+  if (!name || name === 'UNKNOWN') return;
+
+  // Guard 1: skip if already queued (fast path via cached queue rows)
+  var queueRows = getTriggerQueueRowsCached_();
+  var nameLower = name.trim().toLowerCase();
+  for (var q = 0; q < queueRows.length; q++) {
+    if (queueRows[q].name.toLowerCase() === nameLower) return; // already pending
+  }
+
+  // Guard 2: Check cooldown + weekly cap via PropertiesService
+  var props = PropertiesService.getScriptProperties();
+  var weekKey = getCurrentWeekStart_();
+  var cooldownPropKey  = 'smartRetry_cooldown_'  + nameLower;
+  var counterPropKey   = 'smartRetry_count_'     + nameLower + '_' + weekKey;
+
+  var lastRetryStr = props.getProperty(cooldownPropKey);
+  if (lastRetryStr) {
+    var msSince = Date.now() - parseInt(lastRetryStr, 10);
+    if (msSince < 4 * 60 * 60 * 1000) return; // < 4 hours — still in cooldown
+  }
+
+  var retryCountStr = props.getProperty(counterPropKey);
+  var retryCount = retryCountStr ? parseInt(retryCountStr, 10) : 0;
+  if (retryCount >= 3) return; // hit weekly cap
+
+  // Guard 3: Confirm there is an actual FAILURE this week with no later SUCCESS.
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var logSheet = ss.getSheetByName('ComplianceLog');
+  if (!logSheet) return;
+
+  var logData = getRecentLogRows_(logSheet, 500);
+  var latestFailureTs = null;
+  var latestSuccessTs = null;
+
+  for (var i = 0; i < logData.length; i++) {
+    var row = logData[i];
+    if (!row[0]) continue;
+    var rName = String(row[1] || '').trim().toLowerCase();
+    if (rName !== nameLower) continue;
+
+    var ws = row[2];
+    if (ws && typeof ws.getTime === 'function') ws = Utilities.formatDate(ws, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    else ws = String(ws || '');
+    if (ws !== weekKey) continue; // only check this week
+
+    var status = String(row[3] || '').trim().toUpperCase();
+    var ts = row[0];
+    if (ts && typeof ts.getTime === 'function') ts = ts.toISOString(); else ts = String(ts);
+
+    if (status === 'FAILURE') {
+      if (!latestFailureTs || new Date(ts) > new Date(latestFailureTs)) latestFailureTs = ts;
+    }
+    if (status === 'SUCCESS') {
+      if (!latestSuccessTs || new Date(ts) > new Date(latestSuccessTs)) latestSuccessTs = ts;
+    }
+  }
+
+  // Condition: had a FAILURE this week, and no SUCCESS after it
+  if (!latestFailureTs) return; // no failure this week
+  if (latestSuccessTs && new Date(latestSuccessTs) > new Date(latestFailureTs)) return; // already succeeded
+
+  // All guards passed — queue the smart retry
+  var who = 'system:smartRetry';
+  var qSheet = ensureTriggerQueue();
+  // Double-check under lock that nobody else queued in the meantime
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    var freshData = qSheet.getDataRange().getValues();
+    for (var j = 1; j < freshData.length; j++) {
+      if (String(freshData[j][0]).trim().toLowerCase() === nameLower) return; // raced — already queued
+    }
+    var notBefore = new Date().toISOString();
+    qSheet.appendRow([name.trim(), new Date().toISOString(), who, 'FORCE_RUN', notBefore]);
+    SpreadsheetApp.flush();
+
+    // Update cooldown + counter
+    props.setProperty(cooldownPropKey,  String(Date.now()));
+    props.setProperty(counterPropKey,   String(retryCount + 1));
+
+    log_('SmartRetry: queued FORCE_RUN for ' + name +
+         ' (attempt ' + (retryCount + 1) + '/3 this week, failure at ' + latestFailureTs + ')');
+    invalidateCache_();
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // -------------------- WEBHOOK (POST) --------------------
@@ -659,6 +1137,8 @@ function doPost(e) {
       .createTextOutput(JSON.stringify({ result: 'error', error: 'invalid_signature', reason: sigErr }))
       .setMimeType(ContentService.MimeType.JSON);
   }
+  // Note: No ScriptLock here — Sheet.appendRow() is atomic in GAS and safe under concurrency.
+  // A ScriptLock would starve getDashboardData and other concurrent GAS executions.
   try {
     var payload = JSON.parse(e.postData.contents);
     var name            = payload.name            || 'UNKNOWN';
@@ -670,17 +1150,39 @@ function doPost(e) {
 
     var ss    = SpreadsheetApp.getActiveSpreadsheet();
 
-    // Auto-register: add the developer to ExpectedDevelopers if not already there.
-    // Any genuine uploader ping is enough evidence that this is a real developer.
+    // On first ping: add to RegisteredDevelopers; remove from ExpectedDevelopers if present.
     if (name && name !== 'UNKNOWN') {
-      ensureExpectedDevelopersSheet();
-      var expSheet = ss.getSheetByName('ExpectedDevelopers');
-      var expData = expSheet.getDataRange().getValues();
-      var alreadyExpected = false;
-      for (var ei = 1; ei < expData.length; ei++) {
-        if (String(expData[ei][0]).trim().toLowerCase() === name.trim().toLowerCase()) { alreadyExpected = true; break; }
+      var cache = CacheService.getScriptCache();
+      var regCacheKey = 'regDevs_' + name.trim().toLowerCase();
+      var alreadyRegistered = cache.get(regCacheKey);
+      
+      if (!alreadyRegistered) {
+        var regSheet = ensureRegisteredDevelopersSheet();
+        var regData = regSheet.getDataRange().getValues();
+        for (var ri = 1; ri < regData.length; ri++) {
+          if (String(regData[ri][0]).trim().toLowerCase() === name.trim().toLowerCase()) { alreadyRegistered = true; break; }
+        }
+        if (alreadyRegistered) {
+          cache.put(regCacheKey, 'true', 3600);
+        } else {
+          regSheet.appendRow([name.trim(), new Date().toISOString()]);
+          cache.put(regCacheKey, 'true', 3600);
+          log_('Registered new developer: ' + name);
+          // Remove from ExpectedDevelopers if present
+          var expSheet2 = ss.getSheetByName('ExpectedDevelopers');
+          if (expSheet2) {
+            var expData2 = expSheet2.getDataRange().getValues();
+            for (var ei2 = expData2.length - 1; ei2 >= 1; ei2--) {
+              if (String(expData2[ei2][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
+                expSheet2.deleteRow(ei2 + 1);
+                log_('Moved ' + name + ' from Expected to Registered');
+                break;
+              }
+            }
+          }
+          invalidateCache_();
+        }
       }
-      if (!alreadyExpected) { expSheet.appendRow([name.trim()]); log_('Auto-registered: ' + name); invalidateCache_(); }
     }
 
     var isNoise = NOISE_STATUSES.indexOf(status) !== -1;
@@ -692,23 +1194,35 @@ function doPost(e) {
       sheet.appendRow(['Timestamp', 'Developer Name', 'Week Start Date', 'Status', 'Error Message', 'NextPollAt', 'Version', 'LastUpdateCheck']);
       sheet.getRange(1, 1, 1, 8).setFontWeight('bold');
     } else {
-      // Auto-upgrade existing sheets to add new columns
-      var lastCol = sheet.getLastColumn();
-      if (lastCol < 6) {
-        sheet.getRange(1, 6).setValue('NextPollAt').setFontWeight('bold');
-      }
-      if (lastCol < 7) {
-        sheet.getRange(1, 7).setValue('Version').setFontWeight('bold');
-      }
-      if (lastCol < 8) {
-        sheet.getRange(1, 8).setValue('LastUpdateCheck').setFontWeight('bold');
+      var cache = CacheService.getScriptCache();
+      var upgradeCacheKey = 'sheetUpgraded_' + sheetName;
+      var upgraded = cache.get(upgradeCacheKey);
+      if (!upgraded) {
+        var lastCol = sheet.getLastColumn();
+        if (lastCol < 6) { sheet.getRange(1, 6).setValue('NextPollAt').setFontWeight('bold'); }
+        if (lastCol < 7) { sheet.getRange(1, 7).setValue('Version').setFontWeight('bold'); }
+        if (lastCol < 8) { sheet.getRange(1, 8).setValue('LastUpdateCheck').setFontWeight('bold'); }
+        cache.put(upgradeCacheKey, 'true', 21600);
       }
     }
 
     var weekStart = getCurrentWeekStart_();
 
     sheet.appendRow([new Date(), name, weekStart, status, message, nextPollAt, version, lastUpdateCheck]);
-    invalidateCache_();
+    if (!isNoise) {
+      invalidateCache_();
+    }
+
+    // Smart Retry: whenever a developer is seen online (heartbeat/ping), check if they
+    // have a failed upload this week and no trigger queued — if so, auto-queue one.
+    // This is throttled by a 4-hour cooldown and a max of 3 retries per week per user.
+    // We only fire this on HEARTBEAT/WAITING (the most frequent noise events) so it
+    // runs in the background without adding latency to important lifecycle events.
+    if ((status === 'HEARTBEAT' || status === 'WAITING') && name && name !== 'UNKNOWN') {
+      try { checkAndTriggerSmartRetry_(name); } catch (retryErr) {
+        log_('SmartRetry error for ' + name + ': ' + retryErr.message);
+      }
+    }
 
     return ContentService.createTextOutput(JSON.stringify({ result: 'ok' })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
@@ -731,12 +1245,22 @@ function simulatePing(name, status, message) {
 
 // -------------------- PROGRESS STATUS (for live tracker) --------------------
 
+// Read only the last maxRows rows from a sheet (bottom-N slice).
+// Much faster than getDataRange() on sheets with thousands of rows.
+function getRecentLogRows_(sheet, maxRows) {
+  var last = sheet.getLastRow();
+  if (last <= 1) return [];
+  var start = Math.max(2, last - maxRows + 1);
+  return sheet.getRange(start, 1, last - start + 1, sheet.getLastColumn()).getValues();
+}
+
 // Returns current pipeline state for a named developer.
 // hasTrigger=true means a FORCE_RUN is still pending in the queue (not yet consumed).
 // recentLogs is the last 15 entries so the client can derive the current phase.
 // lastNextPollAt: most recent nextPollAt value received from the client.
 function getDeveloperProgressStatus(name) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var nameLower = name.trim().toLowerCase();
 
   var hasTrigger = false;
   var tSheet = ss.getSheetByName('TriggerQueue');
@@ -745,7 +1269,7 @@ function getDeveloperProgressStatus(name) {
     for (var i = 1; i < tData.length; i++) {
       var rowName = String(tData[i][0]).trim().toLowerCase();
       var rowType = tData[i][3] ? String(tData[i][3]).trim() : 'FORCE_RUN';
-      if (rowName === name.trim().toLowerCase() && rowType === 'FORCE_RUN') {
+      if (rowName === nameLower && rowType === 'FORCE_RUN') {
         hasTrigger = true;
         break;
       }
@@ -754,16 +1278,16 @@ function getDeveloperProgressStatus(name) {
 
   var recentLogs = getDeveloperLogs(name, 15);
 
-  // Find the most recent nextPollAt stamp from WAITING, POLLING_ACK or PONG entries
+  // Find the most recent nextPollAt stamp — scan only recent HeartbeatLog rows
   var lastNextPollAt = '';
   var hbSheet = ss.getSheetByName('HeartbeatLog');
   if (hbSheet) {
-    var data = hbSheet.getDataRange().getValues();
-    for (var j = data.length - 1; j >= 1; j--) {
-      var rowStatus = String(data[j][3]).trim().toUpperCase();
+    var hbRows = getRecentLogRows_(hbSheet, 200);
+    for (var j = hbRows.length - 1; j >= 0; j--) {
+      var rowStatus = String(hbRows[j][3]).trim().toUpperCase();
       if ((rowStatus === 'WAITING' || rowStatus === 'POLLING_ACK' || rowStatus === 'PONG')
-          && String(data[j][1]).trim().toLowerCase() === name.trim().toLowerCase()) {
-        var np = data[j][5] ? String(data[j][5]).trim() : '';
+          && String(hbRows[j][1]).trim().toLowerCase() === nameLower) {
+        var np = hbRows[j][5] ? String(hbRows[j][5]).trim() : '';
         if (np) { lastNextPollAt = np; break; }
       }
     }
@@ -772,11 +1296,140 @@ function getDeveloperProgressStatus(name) {
   return { hasTrigger: hasTrigger, recentLogs: recentLogs, lastNextPollAt: lastNextPollAt };
 }
 
+// Optimised batch version: opens each sheet ONCE for all names in a single pass.
+// Previously called getDeveloperProgressStatus(n) per name, which opened 3 sheets each time.
 function getDeveloperProgressStatusBatch(names) {
   if (!names || !names.length) return {};
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Build a lookup set of lowercase names for O(1) membership tests.
+  var nameLowerMap = {}; // lowerName -> originalName
+  names.forEach(function(n) { nameLowerMap[n.trim().toLowerCase()] = n; });
+
+  // 1. Read TriggerQueue ONCE — find FORCE_RUN entries for any of our names.
+  var triggerMap = {};
+  var tSheet = ss.getSheetByName('TriggerQueue');
+  if (tSheet) {
+    var tData = tSheet.getDataRange().getValues();
+    for (var i = 1; i < tData.length; i++) {
+      var rName = String(tData[i][0] || '').trim().toLowerCase();
+      if (!nameLowerMap[rName]) continue;
+      var rType = tData[i][3] ? String(tData[i][3]).trim() : 'FORCE_RUN';
+      if (rType === 'FORCE_RUN') triggerMap[rName] = true;
+    }
+  }
+
+  // 2. Read HeartbeatLog ONCE — find last nextPollAt per developer.
+  var nextPollMap = {};
+  var hbSheet = ss.getSheetByName('HeartbeatLog');
+  if (hbSheet) {
+    var hbRows = getRecentLogRows_(hbSheet, 300);
+    for (var j = hbRows.length - 1; j >= 0; j--) {
+      var hbName = String(hbRows[j][1] || '').trim().toLowerCase();
+      if (!nameLowerMap[hbName] || nextPollMap[hbName]) continue;
+      var hbStatus = String(hbRows[j][3] || '').trim().toUpperCase();
+      if ((hbStatus === 'WAITING' || hbStatus === 'POLLING_ACK' || hbStatus === 'PONG') && hbRows[j][5]) {
+        nextPollMap[hbName] = String(hbRows[j][5]).trim();
+      }
+    }
+  }
+
+  // 3. Read ComplianceLog + HeartbeatLog ONCE each — collect logs for all names.
+  var recentLogsMap = {};
+  names.forEach(function(n) { recentLogsMap[n.trim().toLowerCase()] = []; });
+
+  function collectLogs(sheetName) {
+    var logSheet = ss.getSheetByName(sheetName);
+    if (!logSheet) return;
+    var data = getRecentLogRows_(logSheet, 300);
+    for (var k = 0; k < data.length; k++) {
+      var row = data[k];
+      if (!row[0]) continue;
+      var rn = String(row[1] || '').trim().toLowerCase();
+      if (!recentLogsMap.hasOwnProperty(rn)) continue;
+      var ts = row[0];
+      if (ts && typeof ts.getTime === 'function') ts = ts.toISOString(); else ts = String(ts);
+      recentLogsMap[rn].push({
+        timestamp: ts,
+        status:    String(row[3] || '').trim().toUpperCase(),
+        message:   String(row[4] || '')
+      });
+    }
+  }
+  collectLogs('ComplianceLog');
+  collectLogs('HeartbeatLog');
+
+  // 4. Sort each developer's logs and build the result object.
   var result = {};
   names.forEach(function(n) {
-    result[n] = getDeveloperProgressStatus(n);
+    var nl = n.trim().toLowerCase();
+    var logs = recentLogsMap[nl] || [];
+    logs.sort(function(a, b) { return new Date(b.timestamp) - new Date(a.timestamp); });
+    result[n] = {
+      hasTrigger:     !!triggerMap[nl],
+      recentLogs:     logs.slice(0, 15),
+      lastNextPollAt: nextPollMap[nl] || ''
+    };
+  });
+  return result;
+}
+
+// Returns pending triggers + currently-in-progress pipelines for the Queue page.
+function getQueuePageData() {
+  requireAdmin_();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1. Pending triggers (with notBefore for countdown display)
+  var pending = adminGetTriggerQueue();
+
+  // 2. In-progress runs: recent log entries showing active pipeline stages
+  var pendingNames = {};
+  pending.forEach(function(p) { pendingNames[p.name.toLowerCase()] = true; });
+  var inProgress = getInProgressRuns_(ss, pendingNames);
+
+  return { pending: pending, inProgress: inProgress };
+}
+
+// Scans the last 30 minutes of ComplianceLog for developers with an active pipeline
+// (have GENERATE_START or UPLOAD_START but no terminal SUCCESS/FAILURE yet).
+// excludeNames: object keyed by lowercase names to skip (already pending in TriggerQueue).
+function getInProgressRuns_(ss, excludeNames) {
+  var logSheet = ss.getSheetByName('ComplianceLog');
+  if (!logSheet) return [];
+
+  var rows = getRecentLogRows_(logSheet, 500);
+  var cutoff = new Date(Date.now() - 30 * 60 * 1000); // 30 minutes ago
+  var devState = {};
+
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    if (!row[0]) continue;
+    var ts = row[0];
+    if (ts && typeof ts.getTime === 'function') ts = ts.toISOString();
+    else ts = String(ts);
+    if (new Date(ts) < cutoff) continue;
+
+    var name = String(row[1]).trim();
+    var status = String(row[3]).trim().toUpperCase();
+    var key = name.toLowerCase();
+    if (excludeNames[key]) continue;
+
+    if (!devState[key]) devState[key] = { name: name, terminal: false, active: false };
+    if (status === 'SUCCESS' || status === 'FAILURE' || status === 'ERROR' || status === 'UPDATED') {
+      devState[key].terminal = true;
+    }
+    if (status === 'GENERATE_START' || status === 'UPLOAD_START' || status === 'GENERATE_DONE' || status === 'UPDATE_START') {
+      devState[key].active = true;
+    }
+  }
+
+  var result = [];
+  Object.keys(devState).forEach(function(key) {
+    var d = devState[key];
+    if (d.active && !d.terminal) {
+      result.push(getDeveloperProgressStatus(d.name));
+      result[result.length - 1].name = d.name;
+    }
   });
   return result;
 }
@@ -877,6 +1530,64 @@ function adminSyncActiveToExpected() {
   }
 }
 
+// -------------------- REGISTERED DEVELOPERS MANAGEMENT --------------------
+
+function getRegisteredDevelopersList() {
+  requireAdmin_();
+  ensureRegisteredDevelopersSheet();
+  var data = SpreadsheetApp.getActiveSpreadsheet()
+    .getSheetByName('RegisteredDevelopers').getDataRange().getValues();
+  return data.slice(1).filter(function(r){ return r[0]; }).map(function(r) {
+    return { name: String(r[0]).trim(), registeredAt: r[1] ? String(r[1]).trim() : '' };
+  });
+}
+
+function removeRegisteredDeveloper(name) {
+  requireAdmin_();
+  if (!name) return { success: false, error: 'Name is required' };
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('RegisteredDevelopers');
+    if (!sheet) return { success: false, error: 'Sheet not found' };
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
+        sheet.deleteRow(i + 1);
+        invalidateCache_();
+        log_('Removed registered developer: ' + name);
+        return { success: true };
+      }
+    }
+    return { success: false, error: name + ' not found in RegisteredDevelopers' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function addRegisteredDeveloper(name) {
+  requireAdmin_();
+  if (!name || !name.trim()) return { success: false, error: 'Name is required' };
+  name = name.trim();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var sheet = ensureRegisteredDevelopersSheet();
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]).trim().toLowerCase() === name.toLowerCase()) {
+        return { success: false, error: name + ' is already registered' };
+      }
+    }
+    sheet.appendRow([name, new Date().toISOString()]);
+    invalidateCache_();
+    log_('Admin manually registered: ' + name);
+    return { success: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function log_(msg) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -893,17 +1604,88 @@ function pruneHeartbeatLog() {
   if (!lock.tryLock(30000)) return;
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName('HeartbeatLog');
-    if (!sheet) return;
-    var maxRows = 2000;
-    var lastRow = sheet.getLastRow();
-    if (lastRow > maxRows + 500) {
-      var numToDelete = lastRow - maxRows;
-      sheet.deleteRows(2, numToDelete);
-      log_('Pruned ' + numToDelete + ' rows from HeartbeatLog');
+    
+    // 1. HeartbeatLog: max 2000 rows
+    var hbSheet = ss.getSheetByName('HeartbeatLog');
+    if (hbSheet) {
+      var maxHB = 2000;
+      var lastHB = hbSheet.getLastRow();
+      if (lastHB > maxHB + 500) {
+        var numToDelete = lastHB - maxHB;
+        hbSheet.deleteRows(2, numToDelete);
+        log_('Pruned ' + numToDelete + ' rows from HeartbeatLog');
+      }
+    }
+    
+    // 2. AppLog: max 1000 rows
+    var appSheet = ss.getSheetByName('AppLog');
+    if (appSheet) {
+      var maxApp = 1000;
+      var lastApp = appSheet.getLastRow();
+      if (lastApp > maxApp + 200) {
+        var numToDelete = lastApp - maxApp;
+        appSheet.deleteRows(2, numToDelete);
+        log_('Pruned ' + numToDelete + ' rows from AppLog');
+      }
+    }
+    
+    // 3. ComplianceLog: max 5000 rows (covers ~1 year of compliance history)
+    var compSheet = ss.getSheetByName('ComplianceLog');
+    if (compSheet) {
+      var maxComp = 5000;
+      var lastComp = compSheet.getLastRow();
+      if (lastComp > maxComp + 1000) {
+        var numToDelete = lastComp - maxComp;
+        compSheet.deleteRows(2, numToDelete);
+        log_('Pruned ' + numToDelete + ' rows from ComplianceLog');
+      }
     }
   } catch(e) {
     log_('Prune error: ' + e.toString());
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function adminForcePrune() {
+  requireAdmin_();
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { success: false, error: 'Could not get lock to prune' };
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      var s = sheets[i];
+      var name = s.getName();
+      // Delete excessive empty columns (anything beyond column 15)
+      var maxCols = s.getMaxColumns();
+      if (maxCols > 15) {
+        s.deleteColumns(16, maxCols - 15);
+      }
+      
+      // Prune rows if it's a log sheet
+      if (name === 'HeartbeatLog') {
+        var lr = s.getLastRow();
+        if (lr > 2000) s.deleteRows(2, lr - 2000);
+      } else if (name === 'AppLog') {
+        var lr = s.getLastRow();
+        if (lr > 1000) s.deleteRows(2, lr - 1000);
+      } else if (name === 'ComplianceLog') {
+        var lr = s.getLastRow();
+        if (lr > 3000) s.deleteRows(2, lr - 3000);
+      }
+      
+      // Delete excessive blank rows below data in ALL sheets
+      var lr = s.getLastRow();
+      var maxRows = s.getMaxRows();
+      if (maxRows > lr && (maxRows - Math.max(lr, 1)) > 100) {
+        // Keep a buffer of 100 empty rows, delete the rest
+        s.deleteRows(Math.max(lr, 1) + 100, maxRows - Math.max(lr, 1) - 100);
+      }
+    }
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.toString() };
   } finally {
     lock.releaseLock();
   }
@@ -1113,4 +1895,9 @@ function setUploadFrequency(freq) {
   log_('Settings: uploadFrequency set to ' + freq);
   invalidateCache_();
   return { success: true };
+}
+
+function forceSendUpdateTrigger(name) {
+  if (!name) return { success: false, error: 'No name provided' };
+  return adminQueueTrigger(name, 'UPDATE');
 }

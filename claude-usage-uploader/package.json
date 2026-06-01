@@ -2,6 +2,13 @@
   "dependencies": {
     "googleapis": "^171.4.0",
     "node-fetch": "^2.7.0",
-    "pkg": "^5.8.1"
+    "pkg": "^5.8.1",
+    "xlsx": "^0.18.5"
+  },
+  "scripts": {
+    "build-win": "pkg claude-usage-uploader.js --target node16-win-x64 --output ClaudeUsageUploader.exe",
+    "build-mac-x64": "pkg claude-usage-uploader.js --target node16-macos-x64 --output ClaudeUsageUploader-mac-x64",
+    "build-mac-arm64": "pkg claude-usage-uploader.js --target node16-macos-arm64 --no-bytecode --public --public-packages \"*\" --output ClaudeUsageUploader-mac-arm64",
+    "build-linux": "pkg claude-usage-uploader.js --target node16-linux-x64 --output ClaudeUsageUploader-linux-x64"
   }
 }

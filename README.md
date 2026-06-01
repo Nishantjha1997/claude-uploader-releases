@@ -229,6 +229,12 @@ Send a fake ping for any developer/status combination — useful for testing the
 
 ## Part 5 — Troubleshooting
 
+### Windows Defender / Antivirus blocks the executable
+
+- Because this is a custom, internal corporate tool and is not digitally signed with an expensive commercial certificate, Windows Defender will likely flag it with a false-positive heuristic warning like `Behavior:Win32/Persistence.A!ml`.
+- This is triggered because the tool registers a scheduled task and launches hidden scripts (`launcher.vbs`) to run silently in the background, which is a pattern heavily monitored by security software.
+- **Solution:** Add the folder `C:\ClaudeUploader` as an exclusion in Windows Security, then restore the file from the Windows Security "Protection history" tab. Detailed instructions are in `AAINSTALLATION GUIDE.txt` under **Step 2B**.
+
 ### Tool not appearing online after setup
 
 - Check `%APPDATA%\ClaudeUsageUploader\config.json` exists and has `"name"` field
