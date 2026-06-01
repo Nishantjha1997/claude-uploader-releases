@@ -593,7 +593,7 @@ function formatProjectName(id) {
   if (id === 'subagents') return '⚙ Background Helpers (subagents)';
   
   // Detect if the ID is just a hex hash/UUID (typical of ad-hoc CLI sessions without a git repo or directory context)
-  var rawCleaned = id.replace(/[\s\-\–\\\/]/g, '');
+  var rawCleaned = id.replace(/[^a-zA-Z0-9]/g, '');
   if (/^[0-9a-fA-F]+$/.test(rawCleaned)) {
     return '💬 Ad-hoc CLI Sessions';
   }

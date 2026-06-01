@@ -269,7 +269,7 @@ body {
 
 /* TABLE */
 .data-table{width:100%;border-collapse:collapse;font-size:13px}
-.data-table thead th{padding:10px 14px;text-align:left;font-size:10px;font-weight:700;
+.data-table thead th{position:sticky;top:0;z-index:10;background:var(--bg2);padding:10px 14px;text-align:left;font-size:10px;font-weight:700;
   letter-spacing:.7px;text-transform:uppercase;color:var(--t3);
   border-bottom:1px solid var(--glass-b);white-space:nowrap}
 .data-table tbody td{padding:13px 14px;border-bottom:1px solid rgba(255,255,255,.04);
@@ -278,7 +278,7 @@ body {
 .data-table tbody tr:hover{background:rgba(255,255,255,.035)}
 .data-table tbody tr:last-child td{border-bottom:none}
 .clickable-row{cursor:pointer}
-.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.table-wrap{overflow-x:auto;overflow-y:auto;max-height:68vh;-webkit-overflow-scrolling:touch}
 
 /* BADGE */
 .badge{display:inline-flex;align-items:center;gap:4px;padding:4px 11px;border-radius:999px;
