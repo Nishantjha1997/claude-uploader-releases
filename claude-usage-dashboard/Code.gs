@@ -32,7 +32,7 @@ function include(filename) {
  */
 function getDashboardData(forceRefresh) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'claude_dashboard_data_v5';
+  var cacheKey = 'claude_dashboard_data_v6';
 
   if (!forceRefresh) {
     var cached = getLargeCache(cache, cacheKey);
@@ -63,7 +63,7 @@ function getDashboardData(forceRefresh) {
  */
 function clearDashboardCache() {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'claude_dashboard_data_v5';
+  var cacheKey = 'claude_dashboard_data_v6';
   
   try {
     var meta = cache.get(cacheKey + '_meta');
@@ -307,7 +307,9 @@ function performDriveScan() {
 
       rawSessions.forEach(function(session) {
         var rawProjName = session.sessionId || session.period || 'Unknown Project';
-        var cleanProjName = formatProjectName(rawProjName);
+        var classified = classifyProject(rawProjName);
+        var cleanProjName = classified.displayName;
+        var projKind = classified.kind;
         var sCost = session.totalCost || session.cost || 0;
         var sTokens = session.totalTokens || 0;
         var sLastActivity = (session.metadata && session.metadata.lastActivity) || session.lastActivity || '';
@@ -341,6 +343,7 @@ function performDriveScan() {
         if (!userProjectsMap[cleanProjName]) {
           userProjectsMap[cleanProjName] = {
             name: cleanProjName,
+            kind: projKind,
             cost: 0,
             tokens: 0,
             sessions: 0,
@@ -358,6 +361,7 @@ function performDriveScan() {
         if (!projectAggregates[cleanProjName]) {
           projectAggregates[cleanProjName] = {
             name: cleanProjName,
+            kind: projKind,
             activeDevs: {},
             devCount: 0,
             sessions: 0,
@@ -381,6 +385,12 @@ function performDriveScan() {
       }
     }
 
+    // Distinct *real* project count — buckets (ad-hoc, demo, untitled, subagents)
+    // do not count toward the project-diversity score.
+    var realProjectCount = userProjects.filter(function(p) {
+      return p.kind === 'project';
+    }).length;
+
     var cacheHitRate = totalTokens > 0 ? (cacheReadTokens / totalTokens) * 100 : 0;
     var primaryModel = getPrimaryModelFromMap(modelsUsedMap);
     var activityLevel = activeDays >= 20 ? 'Heavy' : (activeDays >= 10 ? 'Moderate' : (activeDays >= 3 ? 'Light' : 'Minimal'));
@@ -399,7 +409,7 @@ function performDriveScan() {
       cacheHitRate: cacheHitRate,
       activeDays: activeDays,
       totalSessions: totalSessions,
-      distinctProjects: userProjects.length,
+      distinctProjects: realProjectCount,
       lastActivity: lastActivity || 'N/A',
       primaryModel: primaryModel,
       activityLevel: activityLevel,
@@ -418,7 +428,7 @@ function performDriveScan() {
     // Update max metrics for normalized scoring
     if (totalTokens > maxCodeTokens) maxCodeTokens = totalTokens;
     if (activeDays > maxActiveDays) maxActiveDays = activeDays;
-    if (userProjects.length > maxProjects) maxProjects = userProjects.length;
+    if (realProjectCount > maxProjects) maxProjects = realProjectCount;
   }
 
   // Step 3: Compute Values, Scores & Recommendations
@@ -496,6 +506,7 @@ function performDriveScan() {
     var pData = projectAggregates[pName];
     projectsList.push({
       name: pData.name,
+      kind: pData.kind || 'project',
       devCount: Object.keys(pData.activeDevs).length,
       devNames: Object.keys(pData.activeDevs),
       sessions: pData.sessions,
@@ -586,42 +597,149 @@ function performDriveScan() {
 }
 
 /**
- * Format project paths into nice, readable titles
+ * Bucket display names for non-project session activity
  */
-function formatProjectName(id) {
-  if (!id) return 'Unknown Project';
-  if (id === 'subagents') return '⚙ Background Helpers (subagents)';
-  
-  // Detect if the ID is just a hex hash/UUID (typical of ad-hoc CLI sessions without a git repo or directory context)
+var BUCKET_NAMES = {
+  adhoc:     '💬 Ad-hoc CLI Sessions',
+  demo:      '🧪 Demo / Sandbox Sessions',
+  subagents: '⚙ Background Helpers (subagents)',
+  untitled:  '📂 Untitled / Home Directory'
+};
+
+/**
+ * Segments matching any of these classify the session as demo/sandbox usage,
+ * not a real project. Compared case-insensitively against each path segment.
+ */
+var DEMO_KEYWORDS = [
+  'demo', 'demos', 'sandbox', 'practice', 'practical', 'scratch',
+  'test', 'tests', 'testing', 'tmp', 'temp', 'example', 'examples',
+  'tutorial', 'playground', 'poc', 'experiment'
+];
+
+/**
+ * Allowlist of repo / project name fragments that should ALWAYS classify
+ * as real projects, even when the path looks short or ambiguous.
+ * Match is case-insensitive substring against any path segment.
+ * Extend this list as new real projects come online.
+ */
+var REAL_PROJECTS = [
+  'nextdental',
+  'sigmasolve',
+  'claude-usage',
+  'claude-code',
+  'roi-dashboard',
+  'usage-uploader',
+  'gitcodecommit'
+];
+
+/**
+ * Classify a raw ccusage session id into either a real project or a usage
+ * bucket. Returns { kind, displayName }. Buckets collapse many sessions into
+ * one aggregated row instead of polluting Project Analytics.
+ */
+function classifyProject(id) {
+  if (!id) return { kind: 'untitled', displayName: BUCKET_NAMES.untitled };
+  if (id === 'subagents') return { kind: 'subagents', displayName: BUCKET_NAMES.subagents };
+
+  // Whole-string hex/UUID → ad-hoc CLI session
   var rawCleaned = id.replace(/[^a-zA-Z0-9]/g, '');
-  if (/^[0-9a-fA-F]+$/.test(rawCleaned)) {
-    return '💬 Ad-hoc CLI Sessions';
+  if (rawCleaned.length >= 8 && /^[0-9a-fA-F]+$/.test(rawCleaned)) {
+    return { kind: 'adhoc', displayName: BUCKET_NAMES.adhoc };
   }
-  
-  // Replace double dashes or slashes with standard directory labels
+
+  // Normalize path separators and drop drive-letter / empty segments
   var cleaned = id.replace(/\\/g, '-').replace(/\//g, '-').replace(/--/g, '-');
-  
-  // If drive labels are present, e.g. F-SigmaSolve-Projects-nextdental-case-services
-  var parts = cleaned.split('-');
-  
-  // Filter out partition letters like "C" or "F" or empty labels
-  var cleanParts = parts.filter(function(p) {
-    return p.length > 1 || (p !== 'C' && p !== 'F' && p !== 'D' && p !== 'E');
+  var parts = cleaned.split('-').filter(function(p) {
+    if (!p) return false;
+    if (p.length === 1 && /[A-Za-z]/.test(p)) return false; // C, D, E, F drive letters
+    return true;
   });
-  
-  if (cleanParts.length >= 2) {
-    // Take the last two components representing the project category and name
-    var category = cleanParts[cleanParts.length - 2];
-    var name = cleanParts[cleanParts.length - 1];
-    
-    // Capitalize nicely
-    category = capitalizeWords(category);
-    name = capitalizeWords(name);
-    
+
+  if (parts.length === 0) {
+    return { kind: 'untitled', displayName: BUCKET_NAMES.untitled };
+  }
+
+  var lowerParts = parts.map(function(p) { return p.toLowerCase(); });
+
+  // Allowlist beats everything else — known real projects always win
+  for (var i = 0; i < lowerParts.length; i++) {
+    for (var j = 0; j < REAL_PROJECTS.length; j++) {
+      if (lowerParts[i].indexOf(REAL_PROJECTS[j].toLowerCase()) !== -1) {
+        return { kind: 'project', displayName: buildProjectDisplayName(parts) };
+      }
+    }
+  }
+
+  // Trailing-hex detection runs BEFORE demo keywords so that paths like
+  // "tmp-claude-96cf-3225dbfcf35a" classify as ad-hoc (their tail is a UUID),
+  // not as demo just because they contain "tmp".
+
+  // Last 2 segments both look hex → ad-hoc (catches prefixed UUIDs like tmp-claude-96cf-3225dbfcf35a)
+  if (parts.length >= 2) {
+    var lastTwoConcat = parts.slice(-2).join('');
+    if (lastTwoConcat.length >= 8 && /^[0-9a-fA-F]+$/.test(lastTwoConcat)) {
+      return { kind: 'adhoc', displayName: BUCKET_NAMES.adhoc };
+    }
+  }
+  // Single trailing hex-looking segment (≥8 chars) → ad-hoc
+  var lastSeg = parts[parts.length - 1];
+  if (/^[0-9a-fA-F]{8,}$/.test(lastSeg)) {
+    return { kind: 'adhoc', displayName: BUCKET_NAMES.adhoc };
+  }
+
+  // Any demo/sandbox/test keyword as a substring of any segment → demo bucket
+  // (substring match catches concatenated names like "PracticalDemo" or "salesdemo")
+  for (var k = 0; k < lowerParts.length; k++) {
+    for (var kk = 0; kk < DEMO_KEYWORDS.length; kk++) {
+      if (lowerParts[k].indexOf(DEMO_KEYWORDS[kk]) !== -1) {
+        return { kind: 'demo', displayName: BUCKET_NAMES.demo };
+      }
+    }
+  }
+
+  // Ambiguous short IDs (no allowlist match, no vowel, ≤4 chars per segment) → untitled bucket
+  // This catches things like "Svc – Authz" that aren't real recognizable projects.
+  if (!looksLikeProjectName(parts)) {
+    return { kind: 'untitled', displayName: BUCKET_NAMES.untitled };
+  }
+
+  return { kind: 'project', displayName: buildProjectDisplayName(parts) };
+}
+
+/**
+ * Heuristic for "real project" classification when there's no allowlist match.
+ * Real ccusage session IDs come from a working-directory path like
+ * "Users-john-projects-myapp-feature", which has ≥3 meaningful segments and
+ * a recognizable trailing name. We require BOTH:
+ *   1. At least 3 meaningful path segments (depth)
+ *   2. The trailing segment is ≥5 chars with a vowel (looks pronounceable)
+ *
+ * This intentionally treats short 2-segment IDs like "Svc-Authz",
+ * "AI-Agent", or "Anij-PracticalDemo" as untitled rather than guessing.
+ * Promote them via the REAL_PROJECTS allowlist when confirmed.
+ */
+function looksLikeProjectName(parts) {
+  if (parts.length < 3) return false;
+  var last = parts[parts.length - 1];
+  if (last.length < 5) return false;
+  if (!/[aeiouAEIOU]/.test(last)) return false;
+  return true;
+}
+
+function buildProjectDisplayName(parts) {
+  if (parts.length >= 2) {
+    var category = capitalizeWords(parts[parts.length - 2]);
+    var name = capitalizeWords(parts[parts.length - 1]);
     return category + ' – ' + name;
   }
-  
-  return capitalizeWords(cleaned.replace(/-/g, ' '));
+  return capitalizeWords(parts[0]);
+}
+
+/**
+ * Back-compat shim — some callers may still want just the display string.
+ */
+function formatProjectName(id) {
+  return classifyProject(id).displayName;
 }
 
 function capitalizeWords(str) {

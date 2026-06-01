@@ -250,6 +250,17 @@
 
       <!-- 📁 PAGE 3: PROJECT ANALYTICS -->
       <section id="page-projects" class="dashboard-page">
+        <div class="glass-card" style="margin-bottom: 1rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.85rem;">
+            <div>
+              <h3 style="margin: 0; font-size: 1rem; color: var(--text-primary); font-weight: 700;"><i class="fa-solid fa-layer-group" style="margin-right: 0.5rem; color: var(--accent-primary);"></i>Other Usage (non-project sessions)</h3>
+              <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.2rem;">Ad-hoc CLI, demos, subagents, and untitled directories are grouped here so the projects table below shows only real codebases.</div>
+            </div>
+          </div>
+          <div id="other-usage-chips" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem;">
+            <!-- Chips injected dynamically by renderOtherUsageCard() -->
+          </div>
+        </div>
         <div class="glass-card">
           <div class="controls-row">
             <div class="search-wrapper">

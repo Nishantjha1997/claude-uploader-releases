@@ -238,6 +238,7 @@ function populateDashboardViews() {
 
   // Populate tables and render SVG charts
   renderLeaderboardTable();
+  renderOtherUsageCard();
   renderProjectTable();
   renderOptimizationTable();
   renderAllCharts();
@@ -377,7 +378,64 @@ function getCategoryCode(cat) {
 }
 
 /**
- * Renders the Project Analytics Table
+ * Renders the "Other Usage" summary card above the Project Analytics table.
+ * Aggregates non-project sessions (ad-hoc CLI, demo/sandbox, untitled, subagents)
+ * into one chip each so they don't pollute the projects list.
+ */
+function renderOtherUsageCard() {
+  const wrap = document.getElementById('other-usage-chips');
+  if (!wrap || !dashboardPayload || !dashboardPayload.projects) return;
+
+  const KIND_META = {
+    adhoc:     { icon: 'fa-terminal',    label: 'Ad-hoc CLI Sessions',     color: 'var(--accent-warning, #f59e0b)' },
+    demo:      { icon: 'fa-flask',       label: 'Demo / Sandbox Sessions', color: 'var(--accent-info, #06b6d4)' },
+    subagents: { icon: 'fa-robot',       label: 'Background Helpers',     color: 'var(--accent-purple, #a855f7)' },
+    untitled:  { icon: 'fa-folder-open', label: 'Untitled / Home Dir',    color: 'var(--text-muted)' }
+  };
+
+  const buckets = { adhoc: null, demo: null, subagents: null, untitled: null };
+  dashboardPayload.projects.forEach(p => {
+    if (p.kind === 'project') return;
+    const k = p.kind || 'untitled';
+    if (!buckets[k]) {
+      buckets[k] = { devs: {}, sessions: 0, totalCost: 0, totalTokens: 0, lastActivity: '' };
+    }
+    (p.devNames || []).forEach(d => buckets[k].devs[d] = true);
+    buckets[k].sessions += p.sessions || 0;
+    buckets[k].totalCost += p.totalCost || 0;
+    buckets[k].totalTokens += p.totalTokens || 0;
+    if (p.lastActivity && p.lastActivity > buckets[k].lastActivity) {
+      buckets[k].lastActivity = p.lastActivity;
+    }
+  });
+
+  const order = ['adhoc', 'demo', 'subagents', 'untitled'];
+  const chips = order.filter(k => buckets[k]).map(k => {
+    const b = buckets[k];
+    const meta = KIND_META[k];
+    return `
+      <div class="other-usage-chip" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 0.85rem 1rem; display: flex; flex-direction: column; gap: 0.35rem; min-width: 0;">
+        <div style="display: flex; align-items: center; gap: 0.5rem; color: ${meta.color}; font-weight: 600; font-size: 0.85rem;">
+          <i class="fa-solid ${meta.icon}"></i>
+          <span>${meta.label}</span>
+        </div>
+        <div style="display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.78rem; color: var(--text-muted);">
+          <span><strong style="color: var(--text-primary);">${Object.keys(b.devs).length}</strong> devs</span>
+          <span><strong style="color: var(--text-primary);">${b.sessions}</strong> sessions</span>
+          <span><strong style="color: var(--accent-primary);">${formatCurrency(b.totalCost)}</strong></span>
+          <span><strong style="color: var(--text-primary);">${formatNumberAbbr(b.totalTokens)}</strong> tokens</span>
+        </div>
+        <div style="font-size: 0.72rem; color: var(--text-muted);">Last: ${formatReadableDate(b.lastActivity) || 'N/A'}</div>
+      </div>
+    `;
+  }).join('');
+
+  wrap.innerHTML = chips || '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 0.5rem;">No non-project session activity.</div>';
+}
+
+/**
+ * Renders the Project Analytics Table — real projects only.
+ * Buckets (ad-hoc, demo, untitled, subagents) are shown in the Other Usage card.
  */
 function renderProjectTable() {
   const tbody = document.getElementById('projects-table-body');
@@ -385,7 +443,9 @@ function renderProjectTable() {
 
   if (!dashboardPayload || !dashboardPayload.projects) return;
 
-  const sortedProj = [...dashboardPayload.projects].sort((a, b) => {
+  const realProjects = dashboardPayload.projects.filter(p => p.kind === 'project');
+
+  const sortedProj = [...realProjects].sort((a, b) => {
     let valA, valB;
     switch (currentProjectSort.colIdx) {
       case 0: valA = a.name; valB = b.name; break;
@@ -402,6 +462,11 @@ function renderProjectTable() {
     }
     return currentProjectSort.desc ? valB - valA : valA - valB;
   });
+
+  if (sortedProj.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem; font-size: 0.9rem;"><i class="fa-solid fa-circle-info" style="margin-right: 0.5rem;"></i>No real project activity detected. Non-project sessions are summarized in the "Other Usage" card above. Extend <code>REAL_PROJECTS</code> in Code.gs to recognize additional repo names.</td></tr>`;
+    return;
+  }
 
   sortedProj.forEach(p => {
     const tr = document.createElement('tr');
@@ -1193,10 +1258,20 @@ function exportProjectsToCSV() {
   if (!dashboardPayload || !dashboardPayload.projects) return;
 
   let csvContent = 'data:text/csv;charset=utf-8,';
-  csvContent += 'Project Name,Active Developers Count,Sessions Logged,Total Cost Contribution (USD),Total Tokens Used,Last Active\r\n';
+  csvContent += 'Type,Project Name,Active Developers Count,Sessions Logged,Total Cost Contribution (USD),Total Tokens Used,Last Active\r\n';
 
-  dashboardPayload.projects.forEach(p => {
+  // Sort: real projects first, then buckets, matching dashboard ordering
+  const kindOrder = { project: 0, adhoc: 1, demo: 2, subagents: 3, untitled: 4 };
+  const sorted = [...dashboardPayload.projects].sort((a, b) => {
+    const ka = kindOrder[a.kind] ?? 9;
+    const kb = kindOrder[b.kind] ?? 9;
+    if (ka !== kb) return ka - kb;
+    return (b.totalCost || 0) - (a.totalCost || 0);
+  });
+
+  sorted.forEach(p => {
     const row = [
+      `"${p.kind || 'project'}"`,
       `"${p.name}"`,
       p.devCount,
       p.sessions,
