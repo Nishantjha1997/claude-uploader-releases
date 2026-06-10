@@ -1,5 +1,5 @@
 <script>
-/* 🚀 standalone Claude Usage Analytics & ROI Dashboard — JavaScript.html */
+/* \ud83d\ude80 standalone Claude Usage Analytics & ROI Dashboard \u2014 JavaScript.html */
 
 // Global Configuration Constants
 const LICENSE_COST_MONTHLY = 20.00; // Flat monthly fee in USD per user license
@@ -12,17 +12,166 @@ let currentProjectSort = { colIdx: 3, desc: true }; // Sort by Cost descending b
 // Page titles & navigation map
 const pageTitles = {
   'dashboard': 'Executive Summary',
+  'trends': 'Trends',
   'leaderboard': 'Developer Leaderboard',
   'projects': 'Project Analytics',
+  'models': 'Models',
   'optimization': 'License Optimization',
-  'export': 'Reports & Export',
-  'methodology': 'Score Methodology'
+  'export': 'Reports & Export'
 };
+
+// v2: client-side state for the freshness poller
+let lastKnownMaxMtime = 0;
+let freshnessPollHandle = null;
+
+/**
+ * v2: Sanitize untrusted strings before inserting into innerHTML.
+ * Used everywhere a developer name, project name, or session ID is rendered
+ * to close the v1 XSS gap where Windows paths or repo names could inject HTML.
+ */
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * v2: Lightweight inline toast (replaces alert()). Auto-dismisses after 4s.
+ * variant: 'info' | 'success' | 'warn' | 'error'
+ */
+function showToast(message, variant) {
+  variant = variant || 'info';
+  const colors = {
+    info:    { bg: 'rgba(37,99,235,0.18)',  border: 'rgba(37,99,235,0.4)',  fg: '#60a5fa', icon: 'fa-circle-info' },
+    success: { bg: 'rgba(16,185,129,0.18)', border: 'rgba(16,185,129,0.4)', fg: '#34d399', icon: 'fa-circle-check' },
+    warn:    { bg: 'rgba(245,158,11,0.18)', border: 'rgba(245,158,11,0.4)', fg: '#fbbf24', icon: 'fa-triangle-exclamation' },
+    error:   { bg: 'rgba(239,68,68,0.18)',  border: 'rgba(239,68,68,0.4)',  fg: '#f87171', icon: 'fa-circle-exclamation' }
+  };
+  const c = colors[variant] || colors.info;
+  const container = document.getElementById('toast-container');
+  if (!container) { console.log('[' + variant + ']', message); return; }
+  const t = document.createElement('div');
+  t.style.cssText = 'pointer-events:auto;background:' + c.bg + ';border:1px solid ' + c.border + ';color:' + c.fg + ';padding:0.7rem 1rem;border-radius:8px;font-size:0.85rem;max-width:380px;display:flex;align-items:center;gap:0.5rem;box-shadow:0 8px 24px rgba(0,0,0,0.3);backdrop-filter:blur(12px);opacity:0;transform:translateX(20px);transition:all 0.25s;';
+  t.innerHTML = '<i class="fa-solid ' + c.icon + '"></i><span style="flex:1;">' + esc(message) + '</span>';
+  container.appendChild(t);
+  requestAnimationFrame(() => { t.style.opacity = '1'; t.style.transform = 'translateX(0)'; });
+  setTimeout(() => {
+    t.style.opacity = '0'; t.style.transform = 'translateX(20px)';
+    setTimeout(() => t.remove(), 250);
+  }, 4000);
+}
+
+function showInlineError(message) {
+  const card = document.getElementById('inline-error-card');
+  const msg = document.getElementById('inline-error-message');
+  if (msg) msg.textContent = message;
+  if (card) card.style.display = 'block';
+}
+function hideInlineError() {
+  const card = document.getElementById('inline-error-card');
+  if (card) card.style.display = 'none';
+}
+
+function showEmptyState(show) {
+  const card = document.getElementById('empty-state-card');
+  if (card) card.style.display = show ? 'block' : 'none';
+}
+
+/**
+ * v2: Methodology drawer open/close + live thresholds injection
+ */
+function openMethodologyDrawer() {
+  const drawer = document.getElementById('methodology-drawer');
+  if (!drawer) return;
+  // Populate live thresholds from current payload
+  const liveEl = document.getElementById('methodology-live-thresholds');
+  const versionEl = document.getElementById('methodology-version-tag');
+  if (versionEl) versionEl.textContent = (dashboardPayload && dashboardPayload.methodologyVersion) || 'v2.0';
+  if (liveEl) {
+    if (dashboardPayload && dashboardPayload.orgSummary) {
+      const s = dashboardPayload.orgSummary;
+      liveEl.innerHTML =
+        '\u2022 <strong>Reporting window:</strong> ' + esc(s.reportPeriod.from) + ' \u2192 ' + esc(s.reportPeriod.to) + ' (' + (s.reportPeriod.windowDays || 30) + ' days, anchored to last upload)<br>' +
+        '\u2022 <strong>Power-user gate:</strong> cost \u2265 $5.00 in last 30 days OR \u2265 3 active days in last 30<br>' +
+        '\u2022 <strong>Onboarding (new hire) window:</strong> first 14 days of activity \u2014 protected from reclamation<br>' +
+        '\u2022 <strong>Inactive threshold for recency gate:</strong> > 30 days since last activity<br>' +
+        '\u2022 <strong>License cost:</strong> $' + (s.licenseMonthlyFee || 20).toFixed(2) + '/user/month';
+    } else {
+      liveEl.textContent = 'No data loaded yet.';
+    }
+  }
+  drawer.classList.add('active');
+}
+function closeMethodologyDrawer() {
+  const d = document.getElementById('methodology-drawer');
+  if (d) d.classList.remove('active');
+}
+
+/**
+ * v2: Mobile sidebar toggle
+ */
+function toggleMobileSidebar() {
+  const sb = document.getElementById('sidebar');
+  if (sb) sb.classList.toggle('mobile-open');
+}
+
+/**
+ * v2: Freshness poller \u2014 checks every 5 min whether the Drive folder has
+ * newer files than what's in the cached payload. Shows a pill if so.
+ */
+function startFreshnessPoller() {
+  if (freshnessPollHandle) clearInterval(freshnessPollHandle);
+  freshnessPollHandle = setInterval(checkFreshness, 5 * 60 * 1000);
+  // First check after a 30s delay so initial load completes
+  setTimeout(checkFreshness, 30000);
+}
+function checkFreshness() {
+  if (!google || !google.script) return;
+  google.script.run
+    .withSuccessHandler(info => {
+      if (!info || !info.maxMtimeMs) return;
+      if (info.maxMtimeMs > lastKnownMaxMtime + 1000) {
+        const pill = document.getElementById('fresh-data-pill');
+        if (pill) pill.style.display = 'inline-flex';
+      }
+    })
+    .withFailureHandler(() => { /* silent */ })
+    .getFreshnessInfo();
+}
 
 document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
+  setupResponsiveSidebar();
   loadDashboardData(false);
+  startFreshnessPoller();
+  // Close modals/drawers with ESC
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeMethodologyDrawer();
+      if (typeof closeProjectDetailModal === 'function') closeProjectDetailModal();
+    }
+  });
+  // Close mobile sidebar when a nav item is clicked
+  document.querySelectorAll('.nav-item').forEach(n => n.addEventListener('click', () => {
+    const sb = document.getElementById('sidebar');
+    if (sb) sb.classList.remove('mobile-open');
+  }));
 });
+
+function setupResponsiveSidebar() {
+  // Show hamburger button on narrow viewports
+  function syncHamburger() {
+    const t = document.getElementById('mobile-menu-toggle');
+    if (!t) return;
+    t.style.display = window.innerWidth < 900 ? 'block' : 'none';
+  }
+  syncHamburger();
+  window.addEventListener('resize', syncHamburger);
+}
 
 /**
  * Handles sidebar navigation page-switches
@@ -52,6 +201,12 @@ function setupNavigation() {
       if (pageId === 'export') {
         loadWebhookUrl();
       }
+      if (pageId === 'trends') {
+        renderTrendsPage();
+      }
+      if (pageId === 'models') {
+        renderModelsPage();
+      }
     });
   });
 }
@@ -70,19 +225,38 @@ function loadDashboardData(forceSync) {
     .withSuccessHandler(payload => {
       document.getElementById('refresh-icon').classList.remove('spinning');
       setLoadingState(false);
-      
+
       if (payload.error) {
-        showErrorToast('Failed to parse Drive reports: ' + payload.message);
+        showInlineError('Failed to parse Drive reports: ' + payload.message);
+        showToast('Failed to load dashboard', 'error');
         return;
       }
-      
+
+      hideInlineError();
       dashboardPayload = payload;
+
+      // v2: top-level empty state if nothing has ever been uploaded
+      if (!payload.users || payload.users.length === 0) {
+        showEmptyState(true);
+      } else {
+        showEmptyState(false);
+      }
+
+      // Hide the fresh-data pill (we just refreshed)
+      const pill = document.getElementById('fresh-data-pill');
+      if (pill) pill.style.display = 'none';
+      if (payload.orgSummary && payload.orgSummary.maxFileMtimeMs) {
+        lastKnownMaxMtime = payload.orgSummary.maxFileMtimeMs;
+      }
+
       populateDashboardViews();
+      if (forceSync) showToast('Dashboard refreshed', 'success');
     })
     .withFailureHandler(err => {
       document.getElementById('refresh-icon').classList.remove('spinning');
       setLoadingState(false);
-      showErrorToast('Server connection failed: ' + err.toString());
+      showInlineError('Server connection failed: ' + err.toString());
+      showToast('Connection failed', 'error');
     })
     .getDashboardData(forceSync);
 }
@@ -207,16 +381,43 @@ function populateDashboardViews() {
   const genDate = formatReadableDate(summary.generatedTime.substring(0, 10));
   document.getElementById('page-subtitle').innerText = `Report Period: ${fromDate} to ${toDate} | Generated: ${genDate}`;
 
-  // Populate Executive Summary KPIs with count-up animation
+  // v2: KPIs use period-aware values (last 30 days) instead of lifetime totals.
+  // Fall back to lifetime for back-compat with older cached payloads (v1).
   const licenseCount = summary.totalLicenses;
-  animateCounter(document.getElementById('kpi-total-cost'), summary.totalCodeCost, formatCurrency, 1400);
+  const period30Cost = (summary.totalCodeCost30d !== undefined) ? summary.totalCodeCost30d : summary.totalCodeCost;
+  animateCounter(document.getElementById('kpi-total-cost'), period30Cost, formatCurrency, 1400);
   animateCounter(document.getElementById('kpi-subscription-spend'), summary.flatSubscriptionSpend || 0, formatCurrency, 1200);
-  animateCounter(document.getElementById('kpi-potential-savings'), summary.potentialSavings || 0, formatCurrency, 1000);
 
-  // ROI Index card
+  // v2: kpi-potential-savings element was removed from HTML; guard against null
+  const potSavEl = document.getElementById('kpi-potential-savings');
+  if (potSavEl) animateCounter(potSavEl, summary.potentialSavings || 0, formatCurrency, 1000);
+
+  // v2: Period delta chip
+  const deltaEl = document.getElementById('kpi-cost-delta');
+  if (deltaEl) {
+    const dp = (summary.costDeltaPct !== undefined && summary.costDeltaPct !== null) ? summary.costDeltaPct : null;
+    if (dp === null || (!summary.totalCodeCostPrior && period30Cost === 0)) {
+      deltaEl.style.display = 'none';
+    } else {
+      const isUp = dp >= 0;
+      const arrow = isUp ? '\u25b2' : '\u25bc';
+      const color = isUp ? 'var(--accent-success)' : 'var(--accent-danger)';
+      deltaEl.style.display = 'inline-flex';
+      deltaEl.style.background = isUp ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+      deltaEl.style.color = color;
+      deltaEl.style.padding = '0.15rem 0.5rem';
+      deltaEl.style.borderRadius = '999px';
+      deltaEl.style.fontSize = '0.72rem';
+      deltaEl.style.fontWeight = '700';
+      deltaEl.style.marginRight = '0.5rem';
+      deltaEl.textContent = arrow + ' ' + Math.abs(dp).toFixed(0) + '%';
+    }
+  }
+
+  // ROI Index card \u2014 uses 30-day cost vs monthly subscription spend (apples-to-apples)
   const roiEl = document.getElementById('kpi-roi-index');
   if (roiEl) {
-    const roiVal = summary.flatSubscriptionSpend > 0 ? (summary.totalCodeCost / summary.flatSubscriptionSpend) : 0;
+    const roiVal = summary.flatSubscriptionSpend > 0 ? (period30Cost / summary.flatSubscriptionSpend) : 0;
     animateCounter(roiEl, roiVal, v => v.toFixed(2) + 'x', 1300);
   }
 
@@ -225,6 +426,9 @@ function populateDashboardViews() {
   animateCounter(activeDevsEl, summary.activeUsersCount, v => `${Math.round(v)} / ${licenseCount}`, 1100);
 
   document.getElementById('kpi-utilization-rate').innerText = `Utilization Rate: ${summary.licenseUtilization}%`;
+
+  // v2: Headline insight at the top of the page
+  renderHeadlineInsight(summary);
 
   // Show org-level warning alert if wasted seats > 0
   const alertBanner = document.getElementById('org-action-alert');
@@ -250,7 +454,7 @@ function populateDashboardViews() {
  * Draws a 7-day sparkline SVG for a given daily history array
  */
 function drawSparkline(history) {
-  if (!history || history.length < 2) return '<span style="color:var(--text-muted)">—</span>';
+  if (!history || history.length < 2) return '<span style="color:var(--text-muted)">\u2014</span>';
   const last7 = history.slice(-7);
   const w = 56, h = 22;
   const maxC = Math.max(...last7.map(h => h.cost), 0.001);
@@ -299,23 +503,35 @@ function renderLeaderboardTable() {
     const tr = document.createElement('tr');
     tr.setAttribute('data-name', user.name.toLowerCase());
     tr.setAttribute('data-category', getCategoryCode(user.category));
-    
+
     const initials = user.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
     const catClass = getCategoryClass(user.category);
-    
+    // v2: prefer period-aware cost; fall back to lifetime for older payloads
+    const displayCost = (user.costLast30d !== undefined) ? user.costLast30d : user.totalCost;
+    // v2: tenure chip \u2014 onboarding < 14 days, otherwise omit
+    const tenureChip = user.isNewHire
+      ? '<span style="display:inline-block;margin-left:0.4rem;background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3);font-size:0.6rem;font-weight:700;padding:0.1rem 0.4rem;border-radius:999px;">NEW \u00b7 ' + user.tenureDays + 'd</span>'
+      : '';
+    // Make the whole row clickable except for the action button
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return; // don't double-trigger from the View button
+      openUserDetailModal(user.name);
+    });
+    const safeName = esc(user.name).replace(/'/g, "\\'");
     tr.innerHTML = `
       <td>
         <div class="dev-cell">
-          <div class="avatar">${initials}</div>
+          <div class="avatar">${esc(initials)}</div>
           <div class="dev-meta">
-            <span class="dev-name">${user.name}</span>
-            <span class="dev-email">${user.email}</span>
+            <span class="dev-name">${esc(user.name)}${tenureChip}</span>
+            <span class="dev-email">${esc(user.email)}</span>
           </div>
         </div>
       </td>
-      <td><span class="pill ${catClass}">${user.category.substring(2)}</span></td>
+      <td><span class="pill ${catClass}">${esc(user.category.substring(2))}</span></td>
       <td style="text-align: right; font-weight: 700; color: #fff;">${user.valueScore}</td>
-      <td style="text-align: right; font-weight: 600; color: var(--accent-primary);">${formatCurrency(user.totalCost)}</td>
+      <td style="text-align: right; font-weight: 600; color: var(--accent-primary);">${esc(formatCurrency(displayCost))}</td>
       <td style="text-align: right;">${user.activeDays}</td>
       <td style="text-align: right;">${user.distinctProjects}</td>
       <td>
@@ -324,17 +540,20 @@ function renderLeaderboardTable() {
           <div class="progress-wrap"><div class="progress-fill ${user.cacheHitRate >= 80 ? 'high' : user.cacheHitRate >= 40 ? 'medium' : 'low'}" style="width:${Math.min(100, user.cacheHitRate).toFixed(1)}%"></div></div>
         </div>
       </td>
-      <td>${formatReadableDate(user.lastActivity)}</td>
+      <td>
+        <span style="font-size:0.85rem;font-weight:600;color:var(--text-primary);" title="Last Claude usage activity">${esc(formatReadableDate(user.lastActivity))}</span>
+        <br><span style="font-size:0.7rem;color:var(--text-muted);" title="When the data file was uploaded to Drive">&#128194; Uploaded: ${user.dailyModified ? esc(formatReadableDate(user.dailyModified.substring(0,10))) : 'Unknown'}</span>
+      </td>
       <td style="padding: 0.5rem 1.25rem;">${drawSparkline(user.dailyHistory)}</td>
       <td>
-        <button class="export-btn" style="padding: 0.4rem 0.75rem; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-glass);" onclick="openUserDetailModal('${user.name}')">
+        <button class="export-btn" style="padding: 0.4rem 0.75rem; font-size: 0.75rem; background: rgba(255,255,255,0.05); border: 1px solid var(--border-glass);" onclick="event.stopPropagation();openUserDetailModal('${safeName}')">
           <i class="fa-solid fa-expand"></i> View
         </button>
       </td>
     `;
     tbody.appendChild(tr);
   });
-  
+
   filterLeaderboardTable();
 }
 
@@ -414,18 +633,19 @@ function renderOtherUsageCard() {
     const b = buckets[k];
     const meta = KIND_META[k];
     return `
-      <div class="other-usage-chip" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 0.85rem 1rem; display: flex; flex-direction: column; gap: 0.35rem; min-width: 0;">
+      <div class="other-usage-chip" onclick="openBucketDetail('${k}')" style="cursor:pointer;background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 0.85rem 1rem; display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; transition: background 0.2s, border-color 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.06)';this.style.borderColor='${meta.color}'" onmouseout="this.style.background='rgba(255,255,255,0.03)';this.style.borderColor='rgba(255,255,255,0.08)'">
         <div style="display: flex; align-items: center; gap: 0.5rem; color: ${meta.color}; font-weight: 600; font-size: 0.85rem;">
           <i class="fa-solid ${meta.icon}"></i>
-          <span>${meta.label}</span>
+          <span>${esc(meta.label)}</span>
+          <i class="fa-solid fa-chevron-right" style="margin-left:auto;font-size:0.7rem;opacity:0.4;"></i>
         </div>
         <div style="display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.78rem; color: var(--text-muted);">
           <span><strong style="color: var(--text-primary);">${Object.keys(b.devs).length}</strong> devs</span>
           <span><strong style="color: var(--text-primary);">${b.sessions}</strong> sessions</span>
-          <span><strong style="color: var(--accent-primary);">${formatCurrency(b.totalCost)}</strong></span>
+          <span><strong style="color: var(--accent-primary);">${esc(formatCurrency(b.totalCost))}</strong></span>
           <span><strong style="color: var(--text-primary);">${formatNumberAbbr(b.totalTokens)}</strong> tokens</span>
         </div>
-        <div style="font-size: 0.72rem; color: var(--text-muted);">Last: ${formatReadableDate(b.lastActivity) || 'N/A'}</div>
+        <div style="font-size: 0.72rem; color: var(--text-muted);">Last activity: ${esc(formatReadableDate(b.lastActivity) || 'N/A')}</div>
       </div>
     `;
   }).join('');
@@ -434,7 +654,7 @@ function renderOtherUsageCard() {
 }
 
 /**
- * Renders the Project Analytics Table — real projects only.
+ * Renders the Project Analytics Table \u2014 real projects only.
  * Buckets (ad-hoc, demo, untitled, subagents) are shown in the Other Usage card.
  */
 function renderProjectTable() {
@@ -471,16 +691,21 @@ function renderProjectTable() {
   sortedProj.forEach(p => {
     const tr = document.createElement('tr');
     tr.setAttribute('data-name', p.name.toLowerCase());
-    const escapedName = p.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const escapedName = esc(p.name).replace(/'/g, "\\'");
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      openProjectDetailModal(p.name);
+    });
     tr.innerHTML = `
-      <td style="font-weight: 600; color: var(--text-primary);"><i class="fa-solid fa-code-branch" style="color: var(--accent-success); margin-right: 0.5rem;"></i> ${p.name}</td>
+      <td style="font-weight: 600; color: var(--text-primary);"><i class="fa-solid fa-code-branch" style="color: var(--accent-success); margin-right: 0.5rem;"></i> ${esc(p.name)}</td>
       <td style="text-align: right;">
-        <button onclick="openProjectDevsModal('${escapedName}')" title="View contributors" style="background: rgba(37,99,235,0.12); border: 1px solid rgba(37,99,235,0.3); color: var(--accent-primary); border-radius: 12px; padding: 0.2rem 0.65rem; cursor: pointer; font-size: 0.78rem; font-weight: 700; transition: background 0.2s;" onmouseover="this.style.background='rgba(37,99,235,0.25)'" onmouseout="this.style.background='rgba(37,99,235,0.12)'">${p.devCount} <i class="fa-solid fa-user-group" style="font-size:0.6rem;opacity:0.8;"></i></button>
+        <button onclick="event.stopPropagation();openProjectDevsModal('${escapedName}')" title="View contributors" style="background: rgba(37,99,235,0.12); border: 1px solid rgba(37,99,235,0.3); color: var(--accent-primary); border-radius: 12px; padding: 0.2rem 0.65rem; cursor: pointer; font-size: 0.78rem; font-weight: 700; transition: background 0.2s;" onmouseover="this.style.background='rgba(37,99,235,0.25)'" onmouseout="this.style.background='rgba(37,99,235,0.12)'">${p.devCount} <i class="fa-solid fa-user-group" style="font-size:0.6rem;opacity:0.8;"></i></button>
       </td>
       <td style="text-align: right;">${p.sessions}</td>
-      <td style="text-align: right; font-weight: 600; color: var(--accent-primary);">${formatCurrency(p.totalCost)}</td>
+      <td style="text-align: right; font-weight: 600; color: var(--accent-primary);">${esc(formatCurrency(p.totalCost))}</td>
       <td style="text-align: right;">${formatNumberAbbr(p.totalTokens)}</td>
-      <td>${formatReadableDate(p.lastActivity)}</td>
+      <td>${esc(formatReadableDate(p.lastActivity))}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -515,13 +740,15 @@ function sortProjectTable(colIdx) {
  */
 function renderOptimizationTable() {
   renderAdoptionTips();
+  renderOnboardingStrip();
   const tbody = document.getElementById('optimization-table-body');
   tbody.innerHTML = '';
 
   if (!dashboardPayload || !dashboardPayload.users) return;
 
-  const candidates = dashboardPayload.users.filter(u => 
-    u.category.includes('Truly Inactive') || u.category.includes('Low Engagement')
+  // v2: skip new hires entirely from the reclamation table (they're shown in the Onboarding strip above)
+  const candidates = dashboardPayload.users.filter(u =>
+    !u.isNewHire && (u.category.includes('Truly Inactive') || u.category.includes('Low Engagement'))
   );
 
   document.getElementById('kpi-wasted-licenses').innerText = candidates.length;
@@ -535,40 +762,85 @@ function renderOptimizationTable() {
   candidates.forEach(user => {
     const tr = document.createElement('tr');
     const catClass = getCategoryClass(user.category);
-    
-    // Safety guard logic check
-    const isProtected = user.totalCost >= 10.00 || user.activeDays >= 3;
-    const safetyPill = isProtected 
+
+    // v2: protection based on the same period-aware gate the server uses
+    const isProtected = (user.costLast30d !== undefined ? user.costLast30d >= 5 : user.totalCost >= 10)
+      || (user.activeDays30d !== undefined ? user.activeDays30d >= 3 : user.activeDays >= 3);
+    const safetyPill = isProtected
       ? `<span class="pill success" style="padding: 0.25rem 0.5rem; font-size: 0.7rem;"><i class="fa-solid fa-shield"></i> Protected</span>`
       : `<span class="pill inactive" style="padding: 0.25rem 0.5rem; font-size: 0.7rem;"><i class="fa-solid fa-circle-minus"></i> Unprotected</span>`;
 
     const initials = user.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
-    
+    // v2: server-computed reclamation confidence (0-100) instead of hard-coded strings
+    const conf = (typeof user.reclamationConfidence === 'number') ? user.reclamationConfidence : (user.category.includes('Truly') ? 99 : 80);
+    const confLabel = conf >= 80 ? 'High' : conf >= 50 ? 'Medium' : conf > 0 ? 'Low' : 'Safe';
+    const confColor = isProtected ? 'var(--text-muted)' : (conf >= 80 ? 'var(--accent-danger)' : conf >= 50 ? 'var(--accent-warning)' : 'var(--accent-success)');
+
+    const safeName = esc(user.name).replace(/'/g, "\\'");
     tr.innerHTML = `
       <td>
         <div class="dev-cell">
-          <div class="avatar">${initials}</div>
+          <div class="avatar">${esc(initials)}</div>
           <div class="dev-meta">
-            <span class="dev-name">${user.name}</span>
-            <span class="dev-email">${user.email}</span>
+            <span class="dev-name">${esc(user.name)}</span>
+            <span class="dev-email">${esc(user.email)}</span>
           </div>
         </div>
       </td>
-      <td><span class="pill ${catClass}">${user.category.substring(2)}</span></td>
+      <td><span class="pill ${catClass}">${esc(user.category.substring(2))}</span></td>
       <td style="text-align: right;">${user.activeDays}</td>
-      <td style="text-align: right; font-weight: 600;">${formatCurrency(user.totalCost)}</td>
+      <td style="text-align: right; font-weight: 600;">${esc(formatCurrency(user.totalCost))}</td>
       <td style="text-align: right; font-weight: 700; color: #fff;">${user.valueScore}</td>
-      <td>${formatReadableDate(user.lastActivity)}</td>
-      <td>${safetyPill}</td>
-      <td style="font-weight: 600; color: ${isProtected ? 'var(--text-muted)' : 'var(--accent-danger)'};">${isProtected ? 'N/A' : (user.category.includes('Truly') ? '99% High' : '80% Medium')}</td>
       <td>
-        <span style="font-weight: 600; color: ${isProtected ? 'var(--text-secondary)' : 'var(--accent-danger)'};">
-          ${isProtected ? 'Keep (Protected)' : (user.category.includes('Truly') ? 'Reclaim License' : 'Recommend Training')}
-        </span>
+        <span style="font-size:0.85rem;font-weight:600;color:var(--text-primary);" title="Last Claude usage activity">${esc(formatReadableDate(user.lastActivity))}</span>
+        <br><span style="font-size:0.7rem;color:var(--text-muted);" title="When the data file was uploaded to Drive">&#128194; Uploaded: ${user.dailyModified ? esc(formatReadableDate(user.dailyModified.substring(0,10))) : 'Unknown'}</span>
+      </td>
+      <td>${safetyPill}</td>
+      <td style="font-weight: 600; color: ${confColor};">${isProtected ? 'N/A' : (conf + '% ' + confLabel)}</td>
+      <td>
+        <div style="display:flex;gap:0.35rem;align-items:center;">
+          <span style="font-weight: 600; color: ${isProtected ? 'var(--text-secondary)' : 'var(--accent-danger)'};">
+            ${isProtected ? 'Keep' : (conf >= 80 ? 'Reclaim' : 'Review')}
+          </span>
+          ${isProtected ? '' : `<button class="export-btn" style="padding:0.3rem 0.6rem;font-size:0.7rem;background:rgba(245,158,11,0.15);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;" onclick="sendReEngagementNudge('${safeName}')" title="Send re-engagement DM via configured webhook"><i class="fa-solid fa-paper-plane"></i> Nudge</button>`}
+        </div>
       </td>
     `;
     tbody.appendChild(tr);
   });
+}
+
+/**
+ * v2: Renders the "\ud83c\udf31 Onboarding (give it time)" strip above the reclamation
+ * table \u2014 new hires (< 14 days tenure) appear here instead of being flagged
+ * as Truly Inactive / Low Engagement.
+ */
+function renderOnboardingStrip() {
+  const existing = document.getElementById('onboarding-strip');
+  if (existing) existing.remove();
+  if (!dashboardPayload || !dashboardPayload.users) return;
+  const newHires = dashboardPayload.users.filter(u => u.isNewHire);
+  if (newHires.length === 0) return;
+  const tableCard = document.querySelector('#page-optimization .glass-card .table-responsive');
+  if (!tableCard) return;
+  const strip = document.createElement('div');
+  strip.id = 'onboarding-strip';
+  strip.className = 'glass-card';
+  strip.style.cssText = 'background:rgba(34,197,94,0.05);border-left:3px solid #22c55e;padding:1rem 1.25rem;margin-bottom:1rem;';
+  strip.innerHTML = '<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#4ade80;margin-bottom:0.5rem;"><i class="fa-solid fa-seedling"></i> Onboarding \u2014 give it 14 days</div>' +
+    '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">' +
+    newHires.map(u => {
+      const initials = u.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
+      const safeName = esc(u.name).replace(/'/g, "\\'");
+      return '<span onclick="openUserDetailModal(\'' + safeName + '\')" style="cursor:pointer;display:inline-flex;align-items:center;gap:0.5rem;background:rgba(255,255,255,0.04);border:1px solid var(--border-glass);border-radius:999px;padding:0.3rem 0.7rem;font-size:0.78rem;">' +
+        '<span style="width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#06b6d4);color:#fff;font-size:0.62rem;font-weight:800;display:flex;align-items:center;justify-content:center;">' + esc(initials) + '</span>' +
+        '<span style="font-weight:600;">' + esc(u.name) + '</span>' +
+        '<span style="color:var(--text-muted);font-size:0.7rem;">' + u.tenureDays + 'd</span>' +
+      '</span>';
+    }).join('') +
+    '</div>';
+  // Insert before the responsive table
+  tableCard.parentNode.insertBefore(strip, tableCard);
 }
 
 /**
@@ -608,7 +880,7 @@ function filterProjectTable() {
 }
 
 /**
- * 📊 Responsive SVGs Drawing Engine
+ * \ud83d\udcca Responsive SVGs Drawing Engine
  */
 function renderAllCharts() {
   if (!dashboardPayload) return;
@@ -632,7 +904,7 @@ function drawOrgCostChart() {
     return;
   }
 
-  // Dimension setup — wider left padding so Y labels never clip
+  // Dimension setup \u2014 wider left padding so Y labels never clip
   const width = container.clientWidth || 600;
   const height = 320;
   const paddingLeft = 72;   // enough room for "$123.45"
@@ -642,7 +914,7 @@ function drawOrgCostChart() {
   const graphWidth = width - paddingLeft - paddingRight;
   const graphHeight = height - paddingTop - paddingBottom;
 
-  // Compute scale — round up to a clean ceiling value
+  // Compute scale \u2014 round up to a clean ceiling value
   const rawMax = Math.max(...series.map(d => d.totalCost), 0.01);
   const magnitude = Math.pow(10, Math.floor(Math.log10(rawMax)));
   const maxCost = Math.ceil(rawMax / magnitude) * magnitude;
@@ -715,7 +987,7 @@ function drawOrgCostChart() {
         </style>
       </defs>`;
 
-  // ── Grid lines + Y-axis labels (outside left) ──────────────────────────────
+  // \u2500\u2500 Grid lines + Y-axis labels (outside left) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   gridLines.forEach(g => {
     const y = yPos(g.v);
     const isBaseline = g.v === 0;
@@ -730,25 +1002,25 @@ function drawOrgCostChart() {
             fill="${isBaseline ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.82)'}">${g.label}</text>`;
   });
 
-  // ── Left vertical axis ──────────────────────────────────────────────────────
+  // \u2500\u2500 Left vertical axis \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   svgHtml += `
     <line x1="${paddingLeft}" y1="${paddingTop}"
           x2="${paddingLeft}" y2="${height - paddingBottom}"
           stroke="rgba(255,255,255,0.15)" stroke-width="1.5" />`;
 
-  // ── Area fill ───────────────────────────────────────────────────────────────
+  // \u2500\u2500 Area fill \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   svgHtml += `
     <polygon class="cct-fill" points="${fillPoints}"
              fill="url(#${gradId})" />`;
 
-  // ── Trend line ──────────────────────────────────────────────────────────────
+  // \u2500\u2500 Trend line \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   svgHtml += `
     <polyline class="cct-line" points="${points}"
               fill="none" stroke="url(#neon-line-grad)" stroke-width="3"
               filter="url(#neon-glow)"
               stroke-linecap="round" stroke-linejoin="round" />`;
 
-  // ── Highlight dots on non-zero points (drawn last, on top) ─────────────────
+  // \u2500\u2500 Highlight dots on non-zero points (drawn last, on top) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   series.forEach((d, idx) => {
     if (d.totalCost > 0) {
       const x = paddingLeft + (idx / (totalPoints - 1 || 1)) * graphWidth;
@@ -758,7 +1030,7 @@ function drawOrgCostChart() {
     }
   });
 
-  // ── X-axis date stamps (Start / Mid / End) ──────────────────────────────────
+  // \u2500\u2500 X-axis date stamps (Start / Mid / End) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   if (totalPoints >= 2) {
     const fmt = i => {
       const d = series[i];
@@ -868,7 +1140,7 @@ function drawOrgModelDonut() {
     `;
   });
 
-  // Center Text overlay — show top model's percentage
+  // Center Text overlay \u2014 show top model's percentage
   const topModel = dataList[0];
   const topPct = topModel ? Math.round((topModel.cost / totalCost) * 100) : 0;
   const topName = topModel ? topModel.name : '';
@@ -929,12 +1201,15 @@ function drawOrgTopSpenders() {
     const barWidth = (u.totalCost / maxCost) * graphWidth;
     const delay = (0.1 + idx * 0.1).toFixed(2);
     animStyles += `@keyframes growS${idx}{from{width:0}to{width:${barWidth}px}} .sbar-${idx}{animation:growS${idx} 0.7s ${delay}s cubic-bezier(0.4,0,0.2,1) both;}`;
-
+    const safeName = esc(u.name).replace(/'/g, "\\'");
+    // v2: click \u2192 user modal
     svgHtml += `
-      <text x="${paddingLeft - 10}" y="${barY + 15}" fill="var(--text-secondary)" font-size="11" font-weight="600" text-anchor="end">${u.name}</text>
-      <rect x="${paddingLeft}" y="${barY}" width="${graphWidth}" height="20" rx="4" fill="rgba(255,255,255,0.02)" />
-      <rect class="sbar-${idx}" x="${paddingLeft}" y="${barY}" width="${barWidth}" height="20" rx="4" fill="var(--accent-primary)" />
-      <text x="${paddingLeft + barWidth + 10}" y="${barY + 15}" fill="var(--text-primary)" font-size="10" font-weight="700" style="opacity:0;animation:areaFadeIn 0.4s ${(parseFloat(delay)+0.5).toFixed(2)}s forwards;">${formatCurrency(u.totalCost)}</text>
+      <g style="cursor:pointer;" onclick="openUserDetailModal('${safeName}')">
+        <text x="${paddingLeft - 10}" y="${barY + 15}" fill="var(--text-secondary)" font-size="11" font-weight="600" text-anchor="end">${esc(u.name)}</text>
+        <rect x="${paddingLeft}" y="${barY}" width="${graphWidth}" height="20" rx="4" fill="rgba(255,255,255,0.02)" />
+        <rect class="sbar-${idx}" x="${paddingLeft}" y="${barY}" width="${barWidth}" height="20" rx="4" fill="var(--accent-primary)" />
+        <text x="${paddingLeft + barWidth + 10}" y="${barY + 15}" fill="var(--text-primary)" font-size="10" font-weight="700" style="opacity:0;animation:areaFadeIn 0.4s ${(parseFloat(delay)+0.5).toFixed(2)}s forwards;">${esc(formatCurrency(u.totalCost))}</text>
+      </g>
     `;
   });
 
@@ -949,7 +1224,9 @@ function drawOrgTopProjects() {
   const container = document.getElementById('org-top-projects');
   container.innerHTML = '';
 
+  // v2: only show *real* projects in the Top 5 \u2014 buckets pollute the visual
   const projects = [...(dashboardPayload.projects || [])]
+    .filter(p => p.kind === 'project')
     .sort((a, b) => b.totalCost - a.totalCost)
     .slice(0, 5);
 
@@ -973,12 +1250,15 @@ function drawOrgTopProjects() {
     const delay = (0.1 + idx * 0.1).toFixed(2);
     let labelText = p.name.length > 20 ? p.name.substring(0, 18) + '...' : p.name;
     animStyles += `@keyframes growP${idx}{from{width:0}to{width:${barWidth}px}} .pbar-${idx}{animation:growP${idx} 0.7s ${delay}s cubic-bezier(0.4,0,0.2,1) both;}`;
-
+    const safeName = esc(p.name).replace(/'/g, "\\'");
+    // v2: click \u2192 project detail modal
     svgHtml += `
-      <text x="${paddingLeft - 10}" y="${barY + 15}" fill="var(--text-secondary)" font-size="11" font-weight="600" text-anchor="end">${labelText}</text>
-      <rect x="${paddingLeft}" y="${barY}" width="${graphWidth}" height="20" rx="4" fill="rgba(255,255,255,0.02)" />
-      <rect class="pbar-${idx}" x="${paddingLeft}" y="${barY}" width="${barWidth}" height="20" rx="4" fill="var(--accent-success)" />
-      <text x="${paddingLeft + barWidth + 10}" y="${barY + 15}" fill="var(--text-primary)" font-size="10" font-weight="700" style="opacity:0;animation:areaFadeIn 0.4s ${(parseFloat(delay)+0.5).toFixed(2)}s forwards;">${formatCurrency(p.totalCost)}</text>
+      <g style="cursor:pointer;" onclick="openProjectDetailModal('${safeName}')">
+        <text x="${paddingLeft - 10}" y="${barY + 15}" fill="var(--text-secondary)" font-size="11" font-weight="600" text-anchor="end">${esc(labelText)}</text>
+        <rect x="${paddingLeft}" y="${barY}" width="${graphWidth}" height="20" rx="4" fill="rgba(255,255,255,0.02)" />
+        <rect class="pbar-${idx}" x="${paddingLeft}" y="${barY}" width="${barWidth}" height="20" rx="4" fill="var(--accent-success)" />
+        <text x="${paddingLeft + barWidth + 10}" y="${barY + 15}" fill="var(--text-primary)" font-size="10" font-weight="700" style="opacity:0;animation:areaFadeIn 0.4s ${(parseFloat(delay)+0.5).toFixed(2)}s forwards;">${esc(formatCurrency(p.totalCost))}</text>
+      </g>
     `;
   });
 
@@ -987,7 +1267,7 @@ function drawOrgTopProjects() {
 }
 
 /**
- * 🔍 Detailed User Modal Open/Close handlers
+ * \ud83d\udd0d Detailed User Modal Open/Close handlers
  */
 function openUserDetailModal(name) {
   if (!dashboardPayload || !dashboardPayload.users) return;
@@ -1038,7 +1318,7 @@ function openProjectDevsModal(projectName) {
 
   document.getElementById('proj-modal-name').innerText = projectName;
   const devNames = proj.devNames || [];
-  document.getElementById('proj-modal-subtitle').innerText = `${devNames.length} contributor${devNames.length !== 1 ? 's' : ''} · ${proj.sessions} sessions · ${formatCurrency(proj.totalCost)} total`;
+  document.getElementById('proj-modal-subtitle').innerText = `${devNames.length} contributor${devNames.length !== 1 ? 's' : ''} \u00b7 ${proj.sessions} sessions \u00b7 ${formatCurrency(proj.totalCost)} total`;
 
   const list = document.getElementById('proj-devs-list');
   list.innerHTML = '';
@@ -1048,8 +1328,8 @@ function openProjectDevsModal(projectName) {
   } else {
     devNames.forEach(name => {
       const devUser = dashboardPayload.users ? dashboardPayload.users.find(u => u.name === name) : null;
-      const devCost = devUser ? formatCurrency(devUser.projects.find(p => p.name === projectName) ? (devUser.projects.find(p => p.name === projectName).cost || 0) : 0) : '—';
-      const devScore = devUser ? devUser.valueScore : '—';
+      const devCost = devUser ? formatCurrency(devUser.projects.find(p => p.name === projectName) ? (devUser.projects.find(p => p.name === projectName).cost || 0) : 0) : '\u2014';
+      const devScore = devUser ? devUser.valueScore : '\u2014';
       const devCategory = devUser ? devUser.category : '';
       const catClass = devUser ? getCategoryClass(devCategory) : 'inactive';
       const initials = name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2).toUpperCase();
@@ -1101,11 +1381,11 @@ function populateSessionTimeline(user) {
 
   sessions.forEach(s => {
     const tr = document.createElement('tr');
-    const modelShort = s.models ? s.models.replace(/claude-/gi, '').replace(/sonnet|opus|haiku/gi, m => m.charAt(0).toUpperCase() + m.slice(1).toLowerCase()) : '—';
+    const modelShort = s.models ? s.models.replace(/claude-/gi, '').replace(/sonnet|opus|haiku/gi, m => m.charAt(0).toUpperCase() + m.slice(1).toLowerCase()) : '\u2014';
     tr.innerHTML = `
       <td style="white-space:nowrap;">${formatReadableDate(s.date)}</td>
       <td style="font-size:0.78rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${s.project}">${s.project}</td>
-      <td style="font-size:0.72rem;color:var(--text-secondary);">${modelShort || '—'}</td>
+      <td style="font-size:0.72rem;color:var(--text-secondary);">${modelShort || '\u2014'}</td>
       <td style="text-align:right;font-size:0.78rem;">${formatNumberAbbr(s.tokens)}</td>
       <td style="text-align:right;font-weight:600;color:var(--accent-primary);">${formatCurrency(s.cost)}</td>
     `;
@@ -1224,7 +1504,7 @@ function drawModalTokenBar(user) {
 }
 
 /**
- * 💾 CSV Data Export Engine
+ * \ud83d\udcbe CSV Data Export Engine
  */
 function exportLeaderboardToCSV() {
   if (!dashboardPayload || !dashboardPayload.users) return;
@@ -1296,10 +1576,11 @@ function triggerFileDownload(content, fileName) {
 }
 
 /**
- * Displays error toasts/modals to the user
+ * v1 back-compat shim \u2014 now routes to the v2 inline toast component
+ * so we never fall back to blocking `alert()` again.
  */
 function showErrorToast(msg) {
-  alert('Warning: ' + msg);
+  showToast(msg, 'error');
 }
 
 function capitalizeWords(str) {
@@ -1309,70 +1590,153 @@ function capitalizeWords(str) {
 }
 
 /**
- * Opens a print-ready executive report in a new browser window
+ * Opens a print-ready executive report in a new browser window.
+ * Dark-themed, fully graphical \u2014 mirrors the dashboard layout.
  */
 function openPrintReport() {
   if (!dashboardPayload) return;
-  const s = dashboardPayload.orgSummary;
-  const users = dashboardPayload.users || [];
-  const projects = dashboardPayload.projects || [];
+  var s        = dashboardPayload.orgSummary;
+  var users    = dashboardPayload.users    || [];
+  var projects = dashboardPayload.projects || [];
 
-  const top5devs = [...users].sort((a,b) => b.totalCost - a.totalCost).slice(0,5);
-  const top5proj = [...projects].sort((a,b) => b.totalCost - a.totalCost).slice(0,5);
+  function captureSvg(id) {
+    var el = document.getElementById(id);
+    if (!el) return '<p style="color:#64748b;font-size:0.8rem">Chart not available</p>';
+    var svgEl = el.querySelector('svg');
+    if (!svgEl) return '<p style="color:#64748b;font-size:0.8rem">Chart not available</p>';
+    var clone = svgEl.cloneNode(true);
+    clone.setAttribute('width','100%'); clone.setAttribute('height','100%'); clone.style.display='block';
+    return clone.outerHTML;
+  }
 
-  const devRows = top5devs.map(u => `
-    <tr>
-      <td>${u.name}</td>
-      <td>${u.category.replace(/^[^\w]+/, '')}</td>
-      <td style="text-align:right">${u.activeDays}</td>
-      <td style="text-align:right">${formatCurrency(u.totalCost)}</td>
-      <td style="text-align:right">${u.valueScore}</td>
-    </tr>`).join('');
+  var fromDate = formatReadableDate(s.reportPeriod.from);
+  var toDate   = formatReadableDate(s.reportPeriod.to);
+  var genDate  = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
 
-  const projRows = top5proj.map(p => `
-    <tr>
-      <td>${p.name}</td>
-      <td style="text-align:right">${p.devCount}</td>
-      <td style="text-align:right">${p.sessions}</td>
-      <td style="text-align:right">${formatCurrency(p.totalCost)}</td>
-    </tr>`).join('');
+  var kpis = [
+    {label:'API-Equivalent Cost (30d)',value:formatCurrency(s.totalCodeCost30d||s.totalCodeCost),color:'#60a5fa'},
+    {label:'Flat Subscription Spend',  value:formatCurrency(s.flatSubscriptionSpend),            color:'#34d399'},
+    {label:'Active Developers',        value:s.activeUsersCount+' / '+s.totalLicenses,           color:'#fbbf24'},
+    {label:'ROI Index (30d)',           value:s.roiIndex30d?s.roiIndex30d.toFixed(2)+'x':'\u2014',    color:'#a78bfa'},
+    {label:'License Utilization',      value:s.licenseUtilization+'%',                           color:'#f472b6'},
+    {label:'Potential Annual Savings', value:formatCurrency((s.potentialSavings||0)*12),          color:'#fb923c'}
+  ];
+  var kpiHtml = kpis.map(function(k){
+    return '<div class="kpi-card"><div class="kpi-val" style="color:'+k.color+'">'+k.value+'</div><div class="kpi-lbl">'+k.label+'</div></div>';
+  }).join('');
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-  <title>Claude ROI Report — ${new Date().toLocaleDateString()}</title>
-  <style>
-    body{font-family:system-ui,sans-serif;color:#111;padding:2rem;max-width:900px;margin:0 auto;}
-    h1{font-size:1.8rem;color:#1e40af;margin-bottom:0.25rem;}
-    .meta{color:#666;font-size:0.85rem;margin-bottom:2rem;}
-    .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem;}
-    .kpi{background:#f0f4ff;border-radius:8px;padding:1rem;text-align:center;}
-    .kpi-val{font-size:1.6rem;font-weight:700;color:#1e40af;}
-    .kpi-lbl{font-size:0.7rem;text-transform:uppercase;color:#555;margin-top:0.25rem;}
-    table{width:100%;border-collapse:collapse;margin-bottom:2rem;}
-    th{background:#1e40af;color:#fff;padding:0.6rem;text-align:left;font-size:0.8rem;}
-    td{padding:0.55rem;border-bottom:1px solid #e5e7eb;font-size:0.85rem;}
-    h2{font-size:1.1rem;font-weight:700;color:#1e40af;margin:1.5rem 0 0.75rem;}
-    .footer{text-align:center;font-size:0.75rem;color:#999;margin-top:2rem;}
-    @media print{body{padding:0;}button{display:none;}}
-  </style></head><body>
-  <button onclick="window.print()" style="float:right;padding:0.5rem 1rem;background:#1e40af;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;">Print / Save PDF</button>
-  <h1>Claude AI ROI Executive Report</h1>
-  <p class="meta">Sigma Solve &nbsp;|&nbsp; Period: ${formatReadableDate(s.reportPeriod.from)} to ${formatReadableDate(s.reportPeriod.to)} &nbsp;|&nbsp; Generated: ${new Date().toLocaleDateString()}</p>
-  <div class="kpi-row">
-    <div class="kpi"><div class="kpi-val">${formatCurrency(s.totalCodeCost)}</div><div class="kpi-lbl">Total API Cost Equiv.</div></div>
-    <div class="kpi"><div class="kpi-val">${formatCurrency(s.flatSubscriptionSpend)}</div><div class="kpi-lbl">Flat Subscription Spend</div></div>
-    <div class="kpi"><div class="kpi-val">${s.activeUsersCount}/${s.totalLicenses}</div><div class="kpi-lbl">Active Developers</div></div>
-    <div class="kpi"><div class="kpi-val">${s.licenseUtilization}%</div><div class="kpi-lbl">License Utilization</div></div>
-  </div>
-  <h2>Top 5 Developers by Usage</h2>
-  <table><thead><tr><th>Developer</th><th>Category</th><th>Active Days</th><th>API Cost</th><th>Value Score</th></tr></thead>
-  <tbody>${devRows}</tbody></table>
-  <h2>Top 5 Active Projects</h2>
-  <table><thead><tr><th>Project</th><th>Developers</th><th>Sessions</th><th>Cost</th></tr></thead>
-  <tbody>${projRows}</tbody></table>
-  <div class="footer">Sigma Solve Claude ROI Dashboard &nbsp;|&nbsp; Auto-generated ${new Date().toISOString()}</div>
-  </body></html>`;
+  var sortedUsers = users.slice().sort(function(a,b){return b.costLast30d-a.costLast30d;});
+  var devRows = sortedUsers.map(function(u,i){
+    var cc = u.category.indexOf('Power')!=-1?'#34d399':u.category.indexOf('Chat')!=-1?'#60a5fa':u.category.indexOf('Code')!=-1?'#fbbf24':u.category.indexOf('Low')!=-1?'#f59e0b':'#f87171';
+    var dc = (u.costLast30d!==undefined)?u.costLast30d:u.totalCost;
+    var hc = u.cacheHitRate>=80?'#34d399':u.cacheHitRate>=40?'#fbbf24':'#f87171';
+    var bg = i%2===0?'rgba(255,255,255,0.02)':'transparent';
+    return '<tr style="background:'+bg+'"><td style="font-weight:600;color:#f1f5f9">'+esc(u.name)+'</td>'
+      +'<td><span style="background:'+cc+'22;color:'+cc+';border:1px solid '+cc+'44;border-radius:999px;padding:0.15rem 0.6rem;font-size:0.72rem;font-weight:600">'+esc(u.category.replace(/^[^\w]+/,''))+'</span></td>'
+      +'<td style="text-align:right;font-weight:700;color:#fff">'+u.valueScore+'</td>'
+      +'<td style="text-align:right;color:#60a5fa;font-weight:600">'+formatCurrency(dc)+'</td>'
+      +'<td style="text-align:right">'+u.activeDays+'</td>'
+      +'<td style="text-align:right">'+u.distinctProjects+'</td>'
+      +'<td style="text-align:right;color:'+hc+'">'+u.cacheHitRate.toFixed(0)+'%</td>'
+      +'<td style="color:#94a3b8;font-size:0.8rem">'+esc(formatReadableDate(u.lastActivity))+'</td></tr>';
+  }).join('');
 
-  const win = window.open('', '_blank');
+  var realP = projects.filter(function(p){return p.kind==='project';}).sort(function(a,b){return b.totalCost-a.totalCost;});
+  var projRows = realP.map(function(p,i){
+    var bg=i%2===0?'rgba(255,255,255,0.02)':'transparent';
+    return '<tr style="background:'+bg+'"><td style="font-weight:600;color:#f1f5f9">'+esc(p.name)+'</td>'
+      +'<td style="text-align:right">'+p.devCount+'</td><td style="text-align:right">'+p.sessions+'</td>'
+      +'<td style="text-align:right;color:#60a5fa;font-weight:600">'+formatCurrency(p.totalCost)+'</td>'
+      +'<td style="text-align:right;color:#94a3b8">'+formatNumberAbbr(p.totalTokens)+'</td>'
+      +'<td style="color:#94a3b8;font-size:0.8rem">'+esc(formatReadableDate(p.lastActivity))+'</td></tr>';
+  }).join('')||'<tr><td colspan="6" style="text-align:center;color:#64748b;padding:1.5rem">No real project activity detected</td></tr>';
+
+  var cands = users.filter(function(u){return !u.isNewHire&&(u.category.indexOf('Truly Inactive')!=-1||u.category.indexOf('Low Engagement')!=-1);});
+  var optRows = cands.map(function(u,i){
+    var conf=(typeof u.reclamationConfidence==='number')?u.reclamationConfidence:(u.category.indexOf('Truly')!=-1?99:80);
+    var cc=conf>=80?'#f87171':conf>=50?'#fbbf24':'#34d399';
+    var bg=i%2===0?'rgba(255,255,255,0.02)':'transparent';
+    return '<tr style="background:'+bg+'"><td style="font-weight:600;color:#f1f5f9">'+esc(u.name)+'</td>'
+      +'<td><span style="background:#f8717122;color:#f87171;border:1px solid #f8717144;border-radius:999px;padding:0.15rem 0.6rem;font-size:0.72rem">'+esc(u.category.replace(/^[^\w]+/,''))+'</span></td>'
+      +'<td style="text-align:right">'+u.activeDays+'</td>'
+      +'<td style="text-align:right;color:#60a5fa">'+formatCurrency(u.totalCost)+'</td>'
+      +'<td style="color:#94a3b8;font-size:0.8rem">'+esc(formatReadableDate(u.lastActivity))+'</td>'
+      +'<td style="font-weight:700;color:'+cc+'">'+conf+'%</td>'
+      +'<td style="font-weight:600;color:'+cc+'">'+(conf>=80?'Reclaim':'Review')+'</td></tr>';
+  }).join('')||'<tr><td colspan="7" style="text-align:center;color:#34d399;padding:1.5rem">&#10003; No inactive licenses!</td></tr>';
+
+  var css='*{box-sizing:border-box;margin:0;padding:0}'
+    +'body{font-family:\'Inter\',system-ui,sans-serif;background:#0f172a;color:#cbd5e1;-webkit-print-color-adjust:exact;print-color-adjust:exact}'
+    +'.print-bar{position:fixed;top:0;left:0;right:0;z-index:999;background:rgba(15,23,42,0.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;padding:0.75rem 2rem;gap:1rem}'
+    +'.print-bar span{font-size:0.85rem;color:#94a3b8}'
+    +'.btn-print{background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;border:none;border-radius:8px;padding:0.55rem 1.4rem;font-size:0.9rem;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(37,99,235,0.4)}'
+    +'@media print{.print-bar{display:none}body{padding:0}}'
+    +'.report{max-width:1100px;margin:0 auto;padding:5rem 2rem 3rem}'
+    +'.cover{background:linear-gradient(135deg,#1e3a5f 0%,#1e1b4b 50%,#0f172a 100%);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:2.5rem;margin-bottom:2rem;position:relative;overflow:hidden}'
+    +'.cover::before{content:"";position:absolute;top:-60px;right:-60px;width:300px;height:300px;background:radial-gradient(circle,rgba(99,102,241,0.15),transparent 70%);border-radius:50%;pointer-events:none}'
+    +'.cover-logo{font-size:0.8rem;font-weight:700;color:#60a5fa;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.5rem}'
+    +'.cover h1{font-size:2rem;font-weight:800;color:#fff;line-height:1.2;margin-bottom:0.5rem}'
+    +'.gtext{background:linear-gradient(90deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}'
+    +'.cover-meta{font-size:0.82rem;color:#94a3b8;margin-top:0.75rem;display:flex;gap:2rem;flex-wrap:wrap}'
+    +'.cover-meta strong{color:#e2e8f0}'
+    +'.section-title{font-size:1rem;font-weight:700;color:#f1f5f9;text-transform:uppercase;letter-spacing:0.06em;border-left:3px solid #3b82f6;padding-left:0.75rem;margin:2rem 0 1rem}'
+    +'.kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:2rem}'
+    +'.kpi-card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:1.25rem 1.5rem}'
+    +'.kpi-val{font-size:1.75rem;font-weight:800;line-height:1}'
+    +'.kpi-lbl{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;margin-top:0.35rem}'
+    +'.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:2rem}'
+    +'.chart-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:1.25rem;min-height:200px}'
+    +'.chart-card h3{font-size:0.85rem;font-weight:700;color:#e2e8f0;margin-bottom:1rem}'
+    +'.chart-card svg{width:100%;height:auto;max-height:220px}'
+    +'.table-wrap{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);border-radius:12px;overflow:hidden;margin-bottom:2rem}'
+    +'table{width:100%;border-collapse:collapse}'
+    +'thead tr{background:rgba(37,99,235,0.25)}'
+    +'th{padding:0.65rem 0.85rem;text-align:left;font-size:0.72rem;font-weight:700;color:#93c5fd;text-transform:uppercase;letter-spacing:0.05em;border-bottom:1px solid rgba(255,255,255,0.08);white-space:nowrap}'
+    +'td{padding:0.6rem 0.85rem;font-size:0.82rem;color:#cbd5e1;border-bottom:1px solid rgba(255,255,255,0.04)}'
+    +'tr:last-child td{border-bottom:none}'
+    +'.footer{text-align:center;font-size:0.72rem;color:#475569;margin-top:3rem;padding-top:1.5rem;border-top:1px solid rgba(255,255,255,0.06)}'
+    +'@media print{.report{padding:1rem}.cover,.chart-grid,.table-wrap{page-break-inside:avoid}.section-title{page-break-after:avoid}}';
+
+  var html='<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+    +'<title>Claude ROI Report \u2014 '+genDate+'</title>'
+    +'<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@700;800&family=Inter:wght@400;600&display=swap" rel="stylesheet">'
+    +'<style>'+css+'</style></head><body>'
+    +'<div class="print-bar"><span>Claude AI ROI Executive Report &nbsp;&middot;&nbsp; '+genDate+'</span>'
+    +'<button class="btn-print" onclick="window.print()">&#128424; Print / Save as PDF</button></div>'
+    +'<div class="report">'
+    +'<div class="cover"><div class="cover-logo">Sigma Solve &middot; Claude ROI Dashboard</div>'
+    +'<h1>Claude AI <span class="gtext">ROI Executive Report</span></h1>'
+    +'<div class="cover-meta">'
+    +'<span><strong>Report Period:</strong> '+fromDate+' &rarr; '+toDate+'</span>'
+    +'<span><strong>Generated:</strong> '+genDate+'</span>'
+    +'<span><strong>Licenses:</strong> '+s.totalLicenses+'</span>'
+    +'<span><strong>Active Devs:</strong> '+s.activeUsersCount+'</span>'
+    +'</div></div>'
+    +'<div class="section-title">&#128202; Key Performance Indicators</div>'
+    +'<div class="kpi-grid">'+kpiHtml+'</div>'
+    +'<div class="section-title">&#128200; Usage &amp; Cost Charts</div>'
+    +'<div class="chart-grid">'
+    +'<div class="chart-card"><h3>Organization Code Cost Trend</h3>'+captureSvg('org-cost-chart')+'</div>'
+    +'<div class="chart-card"><h3>Model Cost Mix</h3>'+captureSvg('org-model-chart')+'</div>'
+    +'<div class="chart-card"><h3>Top High-Usage Developers</h3>'+captureSvg('org-top-spenders')+'</div>'
+    +'<div class="chart-card"><h3>Top Active Projects</h3>'+captureSvg('org-top-projects')+'</div>'
+    +'</div>'
+    +'<div class="section-title">&#128101; Developer Leaderboard &mdash; All '+sortedUsers.length+' Developers</div>'
+    +'<div class="table-wrap"><table>'
+    +'<thead><tr><th>Developer</th><th>Category</th><th style="text-align:right">Value Score</th><th style="text-align:right">Cost (30d)</th><th style="text-align:right">Active Days</th><th style="text-align:right">Projects</th><th style="text-align:right">Cache Hit</th><th>Last Activity</th></tr></thead>'
+    +'<tbody>'+devRows+'</tbody></table></div>'
+    +'<div class="section-title">&#128193; Project Analytics &mdash; '+realP.length+' Real Projects</div>'
+    +'<div class="table-wrap"><table>'
+    +'<thead><tr><th>Project</th><th style="text-align:right">Developers</th><th style="text-align:right">Sessions</th><th style="text-align:right">Cost</th><th style="text-align:right">Tokens</th><th>Last Active</th></tr></thead>'
+    +'<tbody>'+projRows+'</tbody></table></div>'
+    +'<div class="section-title">&#128737; License Optimization &mdash; '+cands.length+' Candidate(s)</div>'
+    +'<div class="table-wrap"><table>'
+    +'<thead><tr><th>Developer</th><th>Category</th><th style="text-align:right">Active Days</th><th style="text-align:right">API Cost</th><th>Last Active</th><th style="text-align:right">Confidence</th><th>Action</th></tr></thead>'
+    +'<tbody>'+optRows+'</tbody></table></div>'
+    +'<div class="footer">Sigma Solve &nbsp;&middot;&nbsp; Claude ROI Dashboard &nbsp;&middot;&nbsp; Auto-generated '+new Date().toISOString()+' &nbsp;&middot;&nbsp; Confidential</div>'
+    +'</div></body></html>';
+
+  var win = window.open('', '_blank');
   win.document.write(html);
   win.document.close();
 }
@@ -1441,7 +1805,9 @@ function updateRoiSimulator() {
   const newLicenses = Math.max(1, s.totalLicenses - val);
   const newUtil = newLicenses > 0 ? Math.min(100, Math.round((s.activeUsersCount / newLicenses) * 100)) : 100;
   const newSubSpend = newLicenses * fee;
-  const roiIdx = newSubSpend > 0 ? Math.round((s.totalCodeCost / newSubSpend) * 100) : 0;
+  // v2: ROI uses last-30-day cost (matches monthly spend timescale)
+  const periodCost = (s.totalCodeCost30d !== undefined) ? s.totalCodeCost30d : s.totalCodeCost;
+  const roiIdx = newSubSpend > 0 ? Math.round((periodCost / newSubSpend) * 100) : 0;
 
   document.getElementById('sim-monthly-savings').innerText = formatCurrency(monthlySavings);
   document.getElementById('sim-annual-savings').innerText = formatCurrency(annualSavings);
@@ -1457,7 +1823,11 @@ function initRoiSimulator() {
   const s = dashboardPayload.orgSummary;
   const slider = document.getElementById('sim-slider');
   if (!slider) return;
-  const maxReclaim = Math.max(0, s.totalLicenses - 1);
+  // v2: cap at the number of *actually reclaimable* licenses, not totalLicenses-1
+  const reclaimable = (dashboardPayload.users || []).filter(u =>
+    (u.category || '').indexOf('Truly Inactive') !== -1 || (u.category || '').indexOf('Low Engagement') !== -1
+  ).length;
+  const maxReclaim = Math.max(1, reclaimable);
   slider.max = maxReclaim;
   slider.value = 0;
   updateRoiSimulator();
@@ -1482,9 +1852,408 @@ function renderAdoptionTips() {
   listEl.innerHTML = chatOnlyUsers.map(u => {
     const initials = u.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2);
     return `<span style="display:inline-flex;align-items:center;gap:0.5rem;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:100px;padding:0.3rem 0.75rem;margin:0.2rem;font-size:0.8rem;">
-      <span style="width:22px;height:22px;background:linear-gradient(135deg,var(--accent-success),var(--accent-primary));border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:0.65rem;font-weight:700;color:#fff;">${initials}</span>
-      ${u.name}
+      <span style="width:22px;height:22px;background:linear-gradient(135deg,var(--accent-success),var(--accent-primary));border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:0.65rem;font-weight:700;color:#fff;">${esc(initials)}</span>
+      ${esc(u.name)}
     </span>`;
   }).join('');
 }
+
+/* \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 v2 ADDITIONS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+
+/**
+ * Auto-generated narrative summary card at the top of Executive Summary.
+ * Gives managers a one-line read: "$X (\u0394%) in the last 30d, Y.Yx ROI, Z reclaimable seats."
+ */
+function renderHeadlineInsight(s) {
+  const el = document.getElementById('exec-headline-text');
+  const card = document.getElementById('exec-headline-card');
+  if (!el || !card || !s) return;
+  const period30 = (s.totalCodeCost30d !== undefined) ? s.totalCodeCost30d : s.totalCodeCost;
+  const roi = s.flatSubscriptionSpend > 0 ? (period30 / s.flatSubscriptionSpend) : 0;
+  const dp = s.costDeltaPct !== undefined ? s.costDeltaPct : null;
+  const deltaText = dp === null ? '' : ' (' + (dp >= 0 ? '+' : '') + dp.toFixed(0) + '% vs prior period)';
+  const wasted = Math.round((s.potentialSavings || 0) / (s.licenseMonthlyFee || 20));
+  let line = 'Your team generated <strong>' + esc(formatCurrency(period30)) + '</strong> of API-equivalent value in the last 30 days' + deltaText + ', a <strong>' + roi.toFixed(2) + 'x</strong> return on the <strong>' + esc(formatCurrency(s.flatSubscriptionSpend)) + '</strong> monthly license spend.';
+  if (wasted > 0) {
+    line += ' <strong style="color:var(--accent-warning);">' + wasted + ' license' + (wasted === 1 ? '' : 's') + '</strong> can be reclaimed \u2014 see License Optimization.';
+  } else {
+    line += ' No reclaimable licenses detected.';
+  }
+  el.innerHTML = line;
+  card.style.display = 'block';
+}
+
+/* \u2500\u2500\u2500 TRENDS PAGE \u2500\u2500\u2500 */
+
+function renderTrendsPage() {
+  if (!dashboardPayload) return;
+  const s = dashboardPayload.orgSummary;
+  const series = dashboardPayload.dailyTimeSeries || [];
+  const users = dashboardPayload.users || [];
+
+  // KPI tiles
+  const period30 = (s.totalCodeCost30d !== undefined) ? s.totalCodeCost30d : s.totalCodeCost;
+  document.getElementById('trends-kpi-30d').textContent = formatCurrency(period30);
+  const deltaChip = document.getElementById('trends-kpi-30d-delta');
+  if (deltaChip) {
+    const dp = s.costDeltaPct !== undefined ? s.costDeltaPct : null;
+    if (dp === null) { deltaChip.textContent = ''; }
+    else {
+      const isUp = dp >= 0;
+      deltaChip.textContent = (isUp ? '\u25b2 ' : '\u25bc ') + Math.abs(dp).toFixed(0) + '%';
+      deltaChip.style.color = isUp ? 'var(--accent-success)' : 'var(--accent-danger)';
+      deltaChip.style.background = isUp ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+      deltaChip.style.padding = '0.15rem 0.5rem';
+      deltaChip.style.borderRadius = '999px';
+      deltaChip.style.fontWeight = '700';
+      deltaChip.style.fontSize = '0.72rem';
+      deltaChip.style.marginRight = '0.4rem';
+    }
+  }
+
+  // This-month-so-far: sum where date prefix matches the anchor month
+  const anchor = s.anchorDate || (series.length ? series[series.length - 1].date : '');
+  const monthPrefix = anchor ? anchor.substring(0, 7) : '';
+  const monthCost = series.filter(d => d.date && d.date.indexOf(monthPrefix) === 0).reduce((a, d) => a + d.totalCost, 0);
+  document.getElementById('trends-kpi-month').textContent = formatCurrency(monthCost);
+  document.getElementById('trends-kpi-month-sub').textContent = monthPrefix ? ('Month: ' + monthPrefix) : 'Calendar month to date';
+
+  document.getElementById('trends-kpi-lifetime').textContent = formatCurrency(s.totalCodeCost || 0);
+  document.getElementById('trends-kpi-cache').textContent = (s.overallCacheHitRate || 0).toFixed(1) + '%';
+
+  // 90-day chart with prior-30 overlay (the first 30 of 90 vs the last 30)
+  renderTrendsCostChart(series);
+
+  // Per-developer small multiples
+  renderTrendsSmallMultiples(users);
+}
+
+function renderTrendsCostChart(series) {
+  const container = document.getElementById('trends-cost-chart');
+  if (!container || series.length === 0) {
+    if (container) container.innerHTML = '<div style="color:var(--text-muted);padding:2rem;text-align:center;">No data in the last 90 days.</div>';
+    return;
+  }
+  const W = container.clientWidth || 800;
+  const H = 280;
+  const pad = { l: 50, r: 20, t: 20, b: 36 };
+  const innerW = W - pad.l - pad.r;
+  const innerH = H - pad.t - pad.b;
+
+  const costs = series.map(d => d.totalCost);
+  const maxC = Math.max(...costs, 0.001);
+  const xStep = innerW / Math.max(1, series.length - 1);
+
+  // Build the current (last 30) and prior (first 30 of 90) lines aligned to last-30 X axis
+  const last30 = series.slice(-30);
+  const prior30 = series.slice(-60, -30);
+  const xStep30 = innerW / Math.max(1, last30.length - 1);
+
+  function pt(arr, i, max) {
+    const x = pad.l + (i * xStep30);
+    const y = pad.t + innerH - ((arr[i] || 0) / max) * innerH;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }
+  const c30 = last30.map(d => d.totalCost);
+  const p30 = prior30.map(d => d.totalCost);
+  const max30 = Math.max(...c30, ...p30, 0.001);
+
+  const currentPts = c30.map((_, i) => pt(c30, i, max30)).join(' ');
+  const priorPts = p30.map((_, i) => pt(p30, i, max30)).join(' ');
+
+  // Gridlines
+  const gridY = [];
+  for (let g = 0; g <= 4; g++) {
+    const y = pad.t + (innerH * g / 4);
+    const v = max30 * (1 - g / 4);
+    gridY.push('<line x1="' + pad.l + '" y1="' + y + '" x2="' + (pad.l + innerW) + '" y2="' + y + '" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>');
+    gridY.push('<text x="' + (pad.l - 8) + '" y="' + (y + 4) + '" text-anchor="end" font-size="10" fill="var(--text-muted)">$' + v.toFixed(0) + '</text>');
+  }
+  // X labels: first / mid / last
+  const xLabels = [0, Math.floor(last30.length / 2), last30.length - 1].map(i =>
+    '<text x="' + (pad.l + i * xStep30) + '" y="' + (H - 12) + '" text-anchor="middle" font-size="10" fill="var(--text-muted)">' + esc(last30[i].date) + '</text>'
+  ).join('');
+
+  container.innerHTML =
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '">' +
+    gridY.join('') +
+    (p30.length > 0
+      ? '<polyline points="' + priorPts + '" fill="none" stroke="rgba(148,163,184,0.6)" stroke-width="2" stroke-dasharray="5,4"/>'
+      : '') +
+    '<polyline points="' + currentPts + '" fill="none" stroke="var(--accent-primary)" stroke-width="2.5" stroke-linecap="round"/>' +
+    xLabels +
+    '<text x="' + (pad.l + 8) + '" y="' + (pad.t + 14) + '" font-size="10" fill="var(--accent-primary)" font-weight="700">\u2014 Last 30 days</text>' +
+    (p30.length > 0 ? '<text x="' + (pad.l + 120) + '" y="' + (pad.t + 14) + '" font-size="10" fill="rgba(148,163,184,0.9)" font-weight="700">- - Prior 30 days</text>' : '') +
+    '</svg>';
+}
+
+function renderTrendsSmallMultiples(users) {
+  const wrap = document.getElementById('trends-small-multiples');
+  if (!wrap) return;
+  if (!users.length) { wrap.innerHTML = '<div style="color:var(--text-muted);padding:1rem;">No developers found.</div>'; return; }
+  const top = [...users].sort((a, b) => (b.costLast30d || b.totalCost) - (a.costLast30d || a.totalCost));
+  wrap.innerHTML = top.map(u => {
+    const hist = (u.dailyHistory || []).slice(-14);
+    const max = Math.max(...hist.map(h => h.cost), 0.001);
+    const w = 200, h = 50;
+    const pts = hist.map((d, i) => {
+      const x = (i / Math.max(1, hist.length - 1)) * (w - 6) + 3;
+      const y = h - 3 - (d.cost / max) * (h - 8);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    const initials = u.name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2).toUpperCase();
+    const period = (u.costLast30d !== undefined) ? u.costLast30d : (u.totalCost || 0);
+    return '<div class="mini-trend-card" onclick="openUserDetailModal(\'' + esc(u.name).replace(/\'/g, '\\\'') + '\')" style="cursor:pointer;background:rgba(255,255,255,0.02);border:1px solid var(--border-glass);border-radius:10px;padding:0.65rem 0.75rem;transition:background 0.2s;" onmouseover="this.style.background=\'rgba(255,255,255,0.05)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.02)\'">' +
+      '<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem;">' +
+        '<div style="width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,var(--accent-primary),var(--accent-secondary));color:#fff;font-size:0.65rem;font-weight:800;display:flex;align-items:center;justify-content:center;">' + esc(initials) + '</div>' +
+        '<div style="flex:1;font-size:0.8rem;font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(u.name) + '</div>' +
+        '<div style="font-size:0.72rem;font-weight:700;color:var(--accent-primary);">' + esc(formatCurrency(period)) + '</div>' +
+      '</div>' +
+      (hist.length >= 2
+        ? '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h + '"><polyline points="' + pts + '" fill="none" stroke="var(--accent-secondary)" stroke-width="2" stroke-linecap="round"/></svg>'
+        : '<div style="height:' + h + 'px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:0.7rem;">No daily data</div>') +
+      '</div>';
+  }).join('');
+}
+
+/* \u2500\u2500\u2500 MODELS PAGE \u2500\u2500\u2500 */
+
+function renderModelsPage() {
+  if (!dashboardPayload) return;
+  const breakdown = dashboardPayload.modelBreakdowns || {};
+  const users = dashboardPayload.users || [];
+
+  // KPI strip \u2014 one tile per model with cost + token count
+  const modelNames = Object.keys(breakdown);
+  const totalCost = modelNames.reduce((a, n) => a + breakdown[n].cost, 0);
+  const kpiStrip = document.getElementById('models-kpi-strip');
+  if (kpiStrip) {
+    kpiStrip.innerHTML = modelNames.map(n => {
+      const m = breakdown[n];
+      const share = totalCost > 0 ? (m.cost / totalCost) * 100 : 0;
+      return '<div class="glass-card stat-card" style="padding:0.9rem;">' +
+        '<div class="stat-header"><span>' + esc(cleanModelName(n)) + '</span><i class="fa-solid fa-microchip"></i></div>' +
+        '<div class="stat-value" style="font-size:1.5rem;">' + esc(formatCurrency(m.cost)) + '</div>' +
+        '<div class="stat-subtitle">' + share.toFixed(1) + '% of spend \u00b7 ' + formatNumberAbbr(m.tokens) + ' tokens</div>' +
+      '</div>';
+    }).join('') || '<div style="color:var(--text-muted);padding:1rem;">No model usage detected.</div>';
+  }
+
+  renderModelsStackedChart(breakdown);
+  renderModelsRateTable(breakdown);
+  renderModelsLeakageTable(users, breakdown);
+}
+
+function renderModelsStackedChart(breakdown) {
+  const container = document.getElementById('models-stacked-chart');
+  if (!container) return;
+  const names = Object.keys(breakdown);
+  if (names.length === 0) { container.innerHTML = '<div style="color:var(--text-muted);padding:2rem;text-align:center;">No model usage detected.</div>'; return; }
+
+  // Build a list of dates from the first model that has a byDateSeries
+  const ref = breakdown[names.find(n => breakdown[n].byDateSeries) || names[0]];
+  if (!ref.byDateSeries) { container.innerHTML = '<div style="color:var(--text-muted);padding:2rem;text-align:center;">No daily data.</div>'; return; }
+  const dates = ref.byDateSeries.map(d => d.date);
+
+  const W = container.clientWidth || 800;
+  const H = 300;
+  const pad = { l: 50, r: 20, t: 20, b: 36 };
+  const innerW = W - pad.l - pad.r;
+  const innerH = H - pad.t - pad.b;
+  const xStep = innerW / Math.max(1, dates.length - 1);
+
+  // Build stacks (cumulative array per date across models)
+  const cumulative = dates.map(() => 0);
+  const palette = ['var(--accent-primary)', 'var(--accent-secondary)', 'var(--accent-success)', 'var(--accent-warning)', 'var(--accent-danger)', '#06b6d4', '#f97316'];
+  let maxStack = 0;
+  const stackEntries = names.map((n, modelIdx) => {
+    const s = breakdown[n].byDateSeries || dates.map(d => ({ date: d, cost: 0 }));
+    const upper = s.map((p, i) => cumulative[i] + p.cost);
+    const lower = cumulative.slice();
+    for (let i = 0; i < dates.length; i++) cumulative[i] = upper[i];
+    maxStack = Math.max(maxStack, Math.max(...upper, 0));
+    return { name: n, upper: upper, lower: lower, color: palette[modelIdx % palette.length] };
+  });
+  if (maxStack === 0) maxStack = 0.001;
+
+  function toXY(i, v) {
+    const x = pad.l + i * xStep;
+    const y = pad.t + innerH - (v / maxStack) * innerH;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }
+
+  const layers = stackEntries.map(layer => {
+    const upPts = layer.upper.map((v, i) => toXY(i, v)).join(' ');
+    const dnPts = layer.lower.map((v, i) => toXY(i, v)).reverse().join(' ');
+    return '<polygon points="' + upPts + ' ' + dnPts + '" fill="' + layer.color + '" fill-opacity="0.45" stroke="' + layer.color + '" stroke-width="1.5"/>';
+  }).join('');
+
+  // Y gridlines
+  let grid = '';
+  for (let g = 0; g <= 4; g++) {
+    const y = pad.t + innerH * g / 4;
+    const v = maxStack * (1 - g / 4);
+    grid += '<line x1="' + pad.l + '" y1="' + y + '" x2="' + (pad.l + innerW) + '" y2="' + y + '" stroke="rgba(255,255,255,0.05)"/>';
+    grid += '<text x="' + (pad.l - 8) + '" y="' + (y + 4) + '" text-anchor="end" font-size="10" fill="var(--text-muted)">$' + v.toFixed(0) + '</text>';
+  }
+  // Legend
+  const legend = stackEntries.map((l, i) =>
+    '<g transform="translate(' + (pad.l + i * 110) + ', ' + (pad.t + 2) + ')">' +
+      '<rect width="10" height="10" fill="' + l.color + '" fill-opacity="0.6"/>' +
+      '<text x="14" y="9" font-size="10" fill="var(--text-primary)">' + esc(cleanModelName(l.name)) + '</text>' +
+    '</g>'
+  ).join('');
+
+  const xLabels = [0, Math.floor(dates.length / 2), dates.length - 1].map(i =>
+    '<text x="' + (pad.l + i * xStep) + '" y="' + (H - 12) + '" text-anchor="middle" font-size="10" fill="var(--text-muted)">' + esc(dates[i]) + '</text>'
+  ).join('');
+
+  container.innerHTML =
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '">' +
+    grid + layers + xLabels + legend + '</svg>';
+}
+
+function renderModelsRateTable(breakdown) {
+  const body = document.getElementById('models-rate-table-body');
+  if (!body) return;
+  const rows = Object.keys(breakdown).map(n => {
+    const m = breakdown[n];
+    const tokensMtok = m.tokens / 1000000;
+    const rate = tokensMtok > 0 ? m.cost / tokensMtok : 0;
+    return { name: n, tokens: m.tokens, cost: m.cost, rate: rate };
+  }).sort((a, b) => b.cost - a.cost);
+  body.innerHTML = rows.length === 0
+    ? '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:1.5rem;">No model usage.</td></tr>'
+    : rows.map(r =>
+        '<tr>' +
+          '<td style="font-weight:600;">' + esc(cleanModelName(r.name)) + '</td>' +
+          '<td style="text-align:right;">' + formatNumberAbbr(r.tokens) + '</td>' +
+          '<td style="text-align:right;font-weight:700;color:var(--accent-primary);">' + esc(formatCurrency(r.cost)) + '</td>' +
+          '<td style="text-align:right;color:var(--text-muted);">$' + r.rate.toFixed(2) + '</td>' +
+        '</tr>'
+      ).join('');
+}
+
+function renderModelsLeakageTable(users, breakdown) {
+  const body = document.getElementById('models-leakage-table-body');
+  if (!body) return;
+  // Flag developers whose Opus cost is >50% of their total but generate <100K output tokens
+  const leaks = users.map(u => {
+    const opus = Object.keys(u.modelCostBreakdown || {})
+      .filter(m => /opus/i.test(m))
+      .reduce((s, m) => s + (u.modelCostBreakdown[m] || 0), 0);
+    const total = Object.values(u.modelCostBreakdown || {}).reduce((s, v) => s + v, 0);
+    const share = total > 0 ? opus / total : 0;
+    return { name: u.name, opusCost: opus, share: share, output: u.outputTokens || 0 };
+  }).filter(x => x.share > 0.5 && x.output < 100000 && x.opusCost > 1)
+    .sort((a, b) => b.opusCost - a.opusCost);
+
+  body.innerHTML = leaks.length === 0
+    ? '<tr><td colspan="4" style="text-align:center;color:var(--accent-success);padding:1.5rem;font-weight:600;"><i class="fa-solid fa-circle-check"></i> No Opus over-use detected.</td></tr>'
+    : leaks.map(r =>
+        '<tr>' +
+          '<td style="font-weight:600;">' + esc(r.name) + '</td>' +
+          '<td style="text-align:right;color:var(--accent-warning);font-weight:700;">' + esc(formatCurrency(r.opusCost)) + '</td>' +
+          '<td style="text-align:right;">' + (r.share * 100).toFixed(0) + '%</td>' +
+          '<td style="text-align:right;">' + formatNumberAbbr(r.output) + '</td>' +
+        '</tr>'
+      ).join('');
+}
+
+/* \u2500\u2500\u2500 PROJECT DETAIL MODAL \u2500\u2500\u2500 */
+
+function openProjectDetailModal(projectName) {
+  if (!dashboardPayload) return;
+  const proj = (dashboardPayload.projects || []).find(p => p.name === projectName);
+  if (!proj) return;
+  document.getElementById('proj-detail-name').innerHTML = '<i class="fa-solid fa-code-branch" style="margin-right:0.5rem;color:var(--accent-success);"></i>' + esc(proj.name);
+  document.getElementById('proj-detail-subtitle').textContent = (proj.devNames || []).length + ' contributor(s) \u00b7 last active ' + (formatReadableDate(proj.lastActivity) || 'N/A');
+  document.getElementById('proj-detail-cost').textContent = formatCurrency(proj.totalCost || 0);
+  document.getElementById('proj-detail-sessions').textContent = proj.sessions || 0;
+  document.getElementById('proj-detail-devs').textContent = (proj.devNames || []).length;
+  const cps = proj.sessions > 0 ? proj.totalCost / proj.sessions : 0;
+  document.getElementById('proj-detail-cps').textContent = formatCurrency(cps);
+  const list = document.getElementById('proj-detail-contributors');
+  list.innerHTML = (proj.devNames || []).map(name => {
+    const user = (dashboardPayload.users || []).find(u => u.name === name);
+    const userCost = user ? (user.projects || []).find(p => p.name === projectName) : null;
+    const c = userCost ? userCost.cost : 0;
+    const initials = name.split(' ').map(p => p.charAt(0)).join('').substring(0, 2).toUpperCase();
+    return '<div style="display:flex;align-items:center;gap:0.85rem;padding:0.7rem 1rem;border-bottom:1px solid var(--border-glass);cursor:pointer;" onclick="closeProjectDetailModal();openUserDetailModal(\'' + esc(name).replace(/\'/g, '\\\'') + '\')">' +
+      '<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent-primary),var(--accent-secondary));color:#fff;font-weight:800;font-size:0.78rem;display:flex;align-items:center;justify-content:center;">' + esc(initials) + '</div>' +
+      '<div style="flex:1;"><div style="font-weight:600;">' + esc(name) + '</div><div style="font-size:0.72rem;color:var(--text-muted);">' + esc((user && user.email) || '') + '</div></div>' +
+      '<div style="font-weight:700;color:var(--accent-primary);">' + esc(formatCurrency(c)) + '</div>' +
+    '</div>';
+  }).join('') || '<div style="color:var(--text-muted);padding:1.5rem;text-align:center;">No contributor data.</div>';
+  document.getElementById('project-detail-modal').classList.add('active');
+}
+function closeProjectDetailModal() {
+  const m = document.getElementById('project-detail-modal');
+  if (m) m.classList.remove('active');
+}
+
+/* \u2500\u2500\u2500 RE-ENGAGEMENT NUDGE \u2500\u2500\u2500 */
+
+/**
+ * v2: Opens a detail modal for a non-project bucket (ad-hoc / demo / etc.)
+ * showing which devs contributed and how much.
+ */
+function openBucketDetail(kind) {
+  if (!dashboardPayload) return;
+  const meta = {
+    adhoc:     { label: '\ud83d\udcac Ad-hoc CLI Sessions',     desc: 'Sessions whose project ID was a UUID/hash \u2014 typically one-off CLI usage from non-project directories.' },
+    demo:      { label: '\ud83e\uddea Demo / Sandbox Sessions', desc: 'Sessions inside paths containing keywords like demo, sandbox, scratch, tmp, practice.' },
+    subagents: { label: '\u2699 Background Helpers',      desc: 'Sub-agent sessions spawned in the background.' },
+    untitled:  { label: '\ud83d\udcc2 Untitled / Home Directory', desc: 'Sessions with no recognizable project structure \u2014 typically run from a home directory or a 2-segment path.' }
+  };
+  const m = meta[kind] || { label: kind, desc: '' };
+  // Reuse the Project Detail modal \u2014 synthesize a fake "project" entry from the bucket
+  const matchingProjects = (dashboardPayload.projects || []).filter(p => p.kind === kind);
+  const merged = {
+    name: m.label,
+    kind: kind,
+    devCount: 0,
+    devNames: [],
+    sessions: 0,
+    totalCost: 0,
+    totalTokens: 0,
+    lastActivity: ''
+  };
+  const devsSet = {};
+  matchingProjects.forEach(p => {
+    merged.sessions += p.sessions || 0;
+    merged.totalCost += p.totalCost || 0;
+    merged.totalTokens += p.totalTokens || 0;
+    (p.devNames || []).forEach(d => devsSet[d] = true);
+    if (p.lastActivity && p.lastActivity > merged.lastActivity) merged.lastActivity = p.lastActivity;
+  });
+  merged.devNames = Object.keys(devsSet);
+  merged.devCount = merged.devNames.length;
+
+  // Stash the merged bucket so openProjectDetailModal can find it
+  if (!dashboardPayload._bucketDetails) dashboardPayload._bucketDetails = {};
+  dashboardPayload._bucketDetails[m.label] = merged;
+  // Swap a temp projects-list lookup by attaching to projects too
+  const fake = Object.assign({}, merged);
+  const idx = (dashboardPayload.projects || []).findIndex(p => p.name === m.label);
+  if (idx === -1) dashboardPayload.projects.push(fake);
+
+  openProjectDetailModal(m.label);
+  // Annotate the subtitle with the bucket description
+  const sub = document.getElementById('proj-detail-subtitle');
+  if (sub) sub.innerHTML = esc(m.desc) + ' \u00b7 ' + merged.devCount + ' contributor(s)';
+}
+
+function sendReEngagementNudge(userName) {
+  if (!confirm('Send a re-engagement DM to "' + userName + '" via the configured webhook?')) return;
+  showToast('Sending nudge to ' + userName + '...', 'info');
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r && r.success) showToast('Nudge sent to ' + userName, 'success');
+      else showToast('Nudge failed: ' + (r && r.message || 'unknown error'), 'error');
+    })
+    .withFailureHandler(e => showToast('Nudge failed: ' + e.toString(), 'error'))
+    .sendUserNudge(userName, '');
+}
+
 </script>

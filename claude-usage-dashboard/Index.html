@@ -14,7 +14,7 @@
   <?!= include('Stylesheet'); ?>
 </head>
 <body>
-  <!-- 🌌 Animated Ambient Background Orbs + Particles -->
+  <!-- &#55356;&#57100; Animated Ambient Background Orbs + Particles -->
   <div class="ambient-background">
     <div class="ambient-orb orb-1"></div>
     <div class="ambient-orb orb-2"></div>
@@ -29,7 +29,7 @@
     </div>
   </div>
 
-  <!-- ⏳ Loading Screen Overlay -->
+  <!-- &#9203; Loading Screen Overlay -->
   <div id="loading-overlay">
     <div class="loader-rings">
       <div class="ring ring-1"></div>
@@ -54,10 +54,10 @@
     <div class="loader-text">Analyzing Claude Usage Reports...</div>
   </div>
 
-  <!-- 🏢 Main Layout Shell -->
+  <!-- &#55356;&#57314; Main Layout Shell -->
   <div id="app-shell">
 
-    <!-- 🧭 Sidebar Panel -->
+    <!-- &#55358;&#56813; Sidebar Panel -->
     <aside id="sidebar">
       <div class="brand-section">
         <div class="logo-container">
@@ -71,6 +71,10 @@
           <i class="fa-solid fa-chart-line"></i>
           <span>Executive Summary</span>
         </li>
+        <li class="nav-item" data-page="trends">
+          <i class="fa-solid fa-arrow-trend-up"></i>
+          <span>Trends</span>
+        </li>
         <li class="nav-item" data-page="leaderboard">
           <i class="fa-solid fa-users"></i>
           <span>Developer Leaderboard</span>
@@ -78,6 +82,10 @@
         <li class="nav-item" data-page="projects">
           <i class="fa-solid fa-folder-tree"></i>
           <span>Project Analytics</span>
+        </li>
+        <li class="nav-item" data-page="models">
+          <i class="fa-solid fa-microchip"></i>
+          <span>Models</span>
         </li>
         <li class="nav-item" data-page="optimization">
           <i class="fa-solid fa-shield-halved"></i>
@@ -87,10 +95,6 @@
           <i class="fa-solid fa-file-export"></i>
           <span>Reports & Export</span>
         </li>
-        <li class="nav-item" data-page="methodology">
-          <i class="fa-solid fa-book-open"></i>
-          <span>Methodology</span>
-        </li>
       </ul>
 
       <div class="sidebar-footer">
@@ -98,7 +102,7 @@
       </div>
     </aside>
 
-    <!-- 💻 Content Shell -->
+    <!-- &#55357;&#56507; Content Shell -->
     <main id="content-area">
       <header>
         <div class="header-meta">
@@ -107,24 +111,65 @@
         </div>
         <div class="header-actions">
           <span class="last-refreshed-badge" id="last-refreshed-badge"><i class="fa-solid fa-circle-dot" style="color:var(--accent-success);margin-right:0.35rem;font-size:0.6rem;"></i>Live</span>
+          <span class="fresh-data-pill" id="fresh-data-pill" onclick="triggerManualSync()" style="display:none;cursor:pointer;background:rgba(245,158,11,0.18);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);border-radius:999px;padding:0.3rem 0.7rem;font-size:0.74rem;font-weight:700;align-items:center;gap:0.35rem;"><i class="fa-solid fa-bell"></i>New data &#8212; refresh</span>
           <button class="sync-pill-btn" onclick="triggerManualSync()">
             <i id="refresh-icon" class="fa-solid fa-rotate"></i>
             Sync Data
           </button>
+          <button class="help-icon-btn" onclick="openMethodologyDrawer()" title="Methodology & calculation reference" style="background:rgba(255,255,255,0.05);border:1px solid var(--border-glass);color:var(--text-secondary);border-radius:8px;padding:0.4rem 0.7rem;cursor:pointer;font-size:0.85rem;">
+            <i class="fa-solid fa-circle-question"></i>
+          </button>
         </div>
       </header>
 
-      <!-- 🪟 PAGE 1: EXECUTIVE SUMMARY -->
+      <!-- Mobile hamburger (visible at narrow widths via CSS) -->
+      <button class="mobile-menu-toggle" id="mobile-menu-toggle" onclick="toggleMobileSidebar()" aria-label="Menu" style="display:none;position:fixed;top:1rem;left:1rem;z-index:1000;background:rgba(15,23,42,0.85);backdrop-filter:blur(12px);border:1px solid var(--border-glass);color:var(--text-primary);border-radius:8px;padding:0.5rem 0.7rem;cursor:pointer;">
+        <i class="fa-solid fa-bars"></i>
+      </button>
+
+      <!-- Inline toast container (replaces alert()) -->
+      <div id="toast-container" style="position:fixed;top:1rem;right:1rem;z-index:2000;display:flex;flex-direction:column;gap:0.5rem;pointer-events:none;"></div>
+
+      <!-- Top-level empty state for zero-data installations -->
+      <div id="empty-state-card" class="glass-card" style="display:none;text-align:center;padding:3rem 1.5rem;margin:2rem auto;max-width:560px;">
+        <i class="fa-solid fa-cloud-arrow-up" style="font-size:3rem;color:var(--accent-primary);margin-bottom:1rem;"></i>
+        <h2 style="margin:0 0 0.5rem 0;font-size:1.3rem;">No usage data uploaded yet</h2>
+        <p style="color:var(--text-muted);font-size:0.9rem;margin:0 0 1.25rem 0;">The dashboard scans <code>*_claude_daily.json</code> and <code>*_claude_session.json</code> files in the shared Drive folder. Once at least one developer has run the uploader, data will appear here.</p>
+        <button onclick="triggerManualSync()" class="sync-pill-btn"><i class="fa-solid fa-rotate"></i> Retry scan</button>
+      </div>
+
+      <!-- Inline error card (used by showInlineError) -->
+      <div id="inline-error-card" class="glass-card" style="display:none;border-left:4px solid var(--accent-danger,#ef4444);padding:1.25rem;margin:1.5rem 0;">
+        <div style="display:flex;align-items:center;gap:0.75rem;">
+          <i class="fa-solid fa-circle-exclamation" style="color:var(--accent-danger,#ef4444);font-size:1.5rem;"></i>
+          <div style="flex:1;">
+            <div style="font-weight:700;margin-bottom:0.25rem;">Something went wrong</div>
+            <div id="inline-error-message" style="color:var(--text-muted);font-size:0.85rem;"></div>
+          </div>
+          <button onclick="triggerManualSync()" style="background:var(--accent-danger,#ef4444);color:white;border:none;border-radius:6px;padding:0.5rem 1rem;cursor:pointer;font-weight:600;">Retry</button>
+        </div>
+      </div>
+
+      <!-- &#55358;&#56991; PAGE 1: EXECUTIVE SUMMARY -->
       <section id="page-dashboard" class="dashboard-page active">
+        <!-- Headline insight (auto-generated v2 narrative) -->
+        <div class="glass-card headline-card" id="exec-headline-card" style="display:none;margin-bottom:1rem;padding:1.25rem 1.5rem;border-left:4px solid var(--accent-primary);">
+          <div style="font-size:0.8rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);font-weight:700;margin-bottom:0.4rem;">&#55357;&#56524; This period at a glance</div>
+          <div id="exec-headline-text" style="font-size:1.0rem;line-height:1.6;color:var(--text-primary);"></div>
+        </div>
+
         <!-- KPI Strips -->
         <div class="stat-grid">
           <div class="glass-card stat-card">
             <div class="stat-header">
-              <span>Total API Cost</span>
+              <span>API-Equivalent Cost (30d)</span>
               <i class="fa-solid fa-coins"></i>
             </div>
             <div class="stat-value" id="kpi-total-cost">$0.00</div>
-            <div class="stat-subtitle">Usage equivalent in commercial value</div>
+            <div class="stat-subtitle">
+              <span id="kpi-cost-delta" class="delta-chip" style="display:none;"></span>
+              <span id="kpi-cost-period">vs prior 30 days</span>
+            </div>
           </div>
           <div class="glass-card stat-card success">
             <div class="stat-header">
@@ -142,13 +187,13 @@
             <div class="stat-value" id="kpi-active-devs">0 / 0</div>
             <div class="stat-subtitle" id="kpi-utilization-rate">Utilization: 0%</div>
           </div>
-          <div class="glass-card stat-card secondary">
+          <div class="glass-card stat-card secondary roi-tile-highlight">
             <div class="stat-header">
-              <span>ROI Index</span>
+              <span>ROI Index (30d)</span>
               <i class="fa-solid fa-rocket"></i>
             </div>
-            <div class="stat-value roi-value" id="kpi-roi-index">—</div>
-            <div class="stat-subtitle">API value vs flat license spend</div>
+            <div class="stat-value roi-value" id="kpi-roi-index">&#8212;</div>
+            <div class="stat-subtitle">API value vs monthly license spend</div>
           </div>
         </div>
 
@@ -200,7 +245,7 @@
         </div>
       </section>
 
-      <!-- 👥 PAGE 2: DEVELOPER LEADERBOARD -->
+      <!-- &#55357;&#56421; PAGE 2: DEVELOPER LEADERBOARD -->
       <section id="page-leaderboard" class="dashboard-page">
         <div class="glass-card" style="margin-bottom: 2rem;">
           <div class="controls-row">
@@ -211,11 +256,11 @@
             <div class="filter-wrapper">
               <select id="leaderboard-filter-category" class="filter-select" onchange="filterLeaderboardTable()">
                 <option value="ALL">All Categories</option>
-                <option value="POWER"> Power Users</option>
-                <option value="CHAT"> Chat-Only</option>
-                <option value="CODE">⚡ Code-Only</option>
-                <option value="LOW">⚠️ Low Engagement</option>
-                <option value="INACTIVE">❌ Truly Inactive</option>
+                <option value="POWER">&#62239; Power Users</option>
+                <option value="CHAT">&#62636; Chat-Only</option>
+                <option value="CODE">&#9889; Code-Only</option>
+                <option value="LOW">&#9888;&#65039; Low Engagement</option>
+                <option value="INACTIVE">&#10060; Truly Inactive</option>
               </select>
               <button class="export-btn" onclick="exportLeaderboardToCSV()">
                 <i class="fa-solid fa-file-csv"></i>
@@ -248,7 +293,7 @@
         </div>
       </section>
 
-      <!-- 📁 PAGE 3: PROJECT ANALYTICS -->
+      <!-- &#55357;&#56513; PAGE 3: PROJECT ANALYTICS -->
       <section id="page-projects" class="dashboard-page">
         <div class="glass-card" style="margin-bottom: 1rem;">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.85rem;">
@@ -293,7 +338,7 @@
         </div>
       </section>
 
-      <!-- 📋 PAGE 4: LICENSE OPTIMIZATION -->
+      <!-- &#55357;&#56523; PAGE 4: LICENSE OPTIMIZATION -->
       <section id="page-optimization" class="dashboard-page">
         <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
           <div class="glass-card stat-card danger">
@@ -390,14 +435,14 @@
               <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-top: 0.25rem;">New Utilization</div>
             </div>
             <div class="glass-card" style="background: rgba(255,255,255,0.02); text-align: center; padding: 1.25rem;">
-              <div style="font-size: 1.5rem; font-family: 'Outfit'; font-weight: 700; color: var(--accent-secondary);" id="sim-roi-index">—</div>
+              <div style="font-size: 1.5rem; font-family: 'Outfit'; font-weight: 700; color: var(--accent-secondary);" id="sim-roi-index">&#8212;</div>
               <div style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-top: 0.25rem;">ROI Index</div>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- 💾 PAGE 5: DATA EXPORTS -->
+      <!-- &#55357;&#56510; PAGE 5: DATA EXPORTS -->
       <section id="page-export" class="dashboard-page">
         <div class="charts-grid" style="grid-template-columns: 1fr 1fr 1fr;">
           <div class="glass-card" style="display: flex; flex-direction: column; justify-content: space-between; height: 280px; padding: 2rem;">
@@ -462,11 +507,120 @@
         </div>
       </section>
 
-      <!-- 📚 PAGE 6: METHODOLOGY & CALCULATIONS -->
-      <section id="page-methodology" class="dashboard-page">
+      <!-- &#55357;&#56520; PAGE 2b: TRENDS -->
+      <section id="page-trends" class="dashboard-page">
+        <div class="stat-grid">
+          <div class="glass-card stat-card">
+            <div class="stat-header">
+              <span>Last 30 days</span>
+              <i class="fa-solid fa-calendar-day"></i>
+            </div>
+            <div class="stat-value" id="trends-kpi-30d">$0.00</div>
+            <div class="stat-subtitle"><span id="trends-kpi-30d-delta" class="delta-chip"></span> vs prior 30d</div>
+          </div>
+          <div class="glass-card stat-card success">
+            <div class="stat-header">
+              <span>This month so far</span>
+              <i class="fa-solid fa-calendar"></i>
+            </div>
+            <div class="stat-value" id="trends-kpi-month">$0.00</div>
+            <div class="stat-subtitle" id="trends-kpi-month-sub">Calendar month to date</div>
+          </div>
+          <div class="glass-card stat-card warning">
+            <div class="stat-header">
+              <span>Lifetime spend captured</span>
+              <i class="fa-solid fa-infinity"></i>
+            </div>
+            <div class="stat-value" id="trends-kpi-lifetime">$0.00</div>
+            <div class="stat-subtitle">Cumulative across all uploads</div>
+          </div>
+          <div class="glass-card stat-card secondary">
+            <div class="stat-header">
+              <span>Org cache hit rate</span>
+              <i class="fa-solid fa-bolt"></i>
+            </div>
+            <div class="stat-value" id="trends-kpi-cache">0%</div>
+            <div class="stat-subtitle">Input-side cache reuse</div>
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <div class="chart-header">
+            <h3><i class="fa-solid fa-chart-area" style="margin-right:0.5rem;color:var(--accent-primary);"></i>90-Day Cost Trend with Prior Period Overlay</h3>
+            <p style="font-size:0.78rem;color:var(--text-muted);">Solid line = current period. Dashed line = same days the period before.</p>
+          </div>
+          <div id="trends-cost-chart" style="height:280px;"></div>
+        </div>
+
+        <div class="glass-card">
+          <div class="chart-header">
+            <h3><i class="fa-solid fa-grip" style="margin-right:0.5rem;color:var(--accent-secondary);"></i>Per-Developer Mini Trends</h3>
+            <p style="font-size:0.78rem;color:var(--text-muted);">14-day sparklines for every developer. Click one to open that developer's profile.</p>
+          </div>
+          <div id="trends-small-multiples" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:0.75rem;"></div>
+        </div>
+      </section>
+
+      <!-- &#55358;&#56598; PAGE 4b: MODELS -->
+      <section id="page-models" class="dashboard-page">
+        <div class="stat-grid" id="models-kpi-strip" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));">
+          <!-- Filled by renderModelsPage -->
+        </div>
+
+        <div class="glass-card">
+          <div class="chart-header">
+            <h3><i class="fa-solid fa-layer-group" style="margin-right:0.5rem;color:var(--accent-primary);"></i>Cost by Model (90-day stacked area)</h3>
+          </div>
+          <div id="models-stacked-chart" style="height:300px;"></div>
+        </div>
+
+        <div class="modal-grid-2">
+          <div class="glass-card">
+            <div class="chart-header">
+              <h3><i class="fa-solid fa-table" style="margin-right:0.5rem;color:var(--accent-success);"></i>Cost per million tokens by model</h3>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th style="text-align:right;">Tokens</th>
+                    <th style="text-align:right;">Cost</th>
+                    <th style="text-align:right;">$/Mtok</th>
+                  </tr>
+                </thead>
+                <tbody id="models-rate-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="glass-card">
+            <div class="chart-header">
+              <h3><i class="fa-solid fa-triangle-exclamation" style="margin-right:0.5rem;color:var(--accent-warning);"></i>Possible Opus over-use (cost leakage)</h3>
+              <p style="font-size:0.78rem;color:var(--text-muted);">Developers running Opus heavily without large generation volume &#8212; likely candidates to shift to Sonnet/Haiku.</p>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Developer</th>
+                    <th style="text-align:right;">Opus cost</th>
+                    <th style="text-align:right;">Opus share</th>
+                    <th style="text-align:right;">Output tokens</th>
+                  </tr>
+                </thead>
+                <tbody id="models-leakage-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- (legacy Methodology section kept hidden so any stray data-page="methodology" refs don't break) -->
+      <section id="page-methodology" class="dashboard-page" style="display:none;">
         <div class="glass-card" style="margin-bottom: 2rem;">
           <div class="chart-header" style="margin-bottom: 1.25rem; border-bottom: 1px solid var(--border-glass); padding-bottom: 1rem;">
-            <h3>Overall Value Score Methodology (0–100)</h3>
+            <h3>Overall Value Score Methodology (0&#8211;100)</h3>
             <span class="pill power">System Standard</span>
           </div>
           <p style="font-size: 0.95rem; color: var(--text-secondary); line-height: 1.6; margin-bottom: 1.5rem;">
@@ -493,13 +647,13 @@
             </div>
 
             <div class="glass-card" style="background: rgba(255, 255, 255, 0.01); border-color: rgba(16, 185, 129, 0.15); padding: 1.5rem;">
-              <h4 style="color: var(--accent-success); font-family: 'Outfit'; font-size: 1.1rem; margin-bottom: 0.75rem;"><i class="fa-solid fa-gauge-high"></i> Code Score Components (0–100)</h4>
+              <h4 style="color: var(--accent-success); font-family: 'Outfit'; font-size: 1.1rem; margin-bottom: 0.75rem;"><i class="fa-solid fa-gauge-high"></i> Code Score Components (0&#8211;100)</h4>
               <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">Normalized relative to the team's top performer (percentile distribution):</p>
               <ul style="list-style: none; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; color: var(--text-secondary);">
-                <li>🔵 <strong style="color: #fff;">Token Volume (40%):</strong> Total tokens relative to team high.</li>
-                <li>🟢 <strong style="color: #fff;">Active Days (30%):</strong> Coding active days relative to team high.</li>
-                <li>🟡 <strong style="color: #fff;">Project Diversity (20%):</strong> Distinct repositories worked on.</li>
-                <li>🔴 <strong style="color: #fff;">Prompt Efficiency (10%):</strong> Output tokens relative to total prompt input (evaluates cache utilization).</li>
+                <li>&#55357;&#56629; <strong style="color: #fff;">Token Volume (40%):</strong> Total tokens relative to team high.</li>
+                <li>&#55357;&#57314; <strong style="color: #fff;">Active Days (30%):</strong> Coding active days relative to team high.</li>
+                <li>&#55357;&#57313; <strong style="color: #fff;">Project Diversity (20%):</strong> Distinct repositories worked on.</li>
+                <li>&#55357;&#56628; <strong style="color: #fff;">Prompt Efficiency (10%):</strong> Output tokens relative to total prompt input (evaluates cache utilization).</li>
               </ul>
             </div>
           </div>
@@ -507,7 +661,7 @@
 
         <div class="glass-card" style="margin-bottom: 2rem;">
           <div class="chart-header" style="margin-bottom: 1.5rem;">
-            <h3>🏷️ User Cohort Categorization Rules</h3>
+            <h3>&#55356;&#57335;&#65039; User Cohort Categorization Rules</h3>
           </div>
           <div class="table-responsive">
             <table>
@@ -520,27 +674,27 @@
               </thead>
               <tbody>
                 <tr>
-                  <td><span class="pill power">🌟 Power User</span></td>
+                  <td><span class="pill power">&#55356;&#57119; Power User</span></td>
                   <td>Active chat in the last 30 days <strong>AND</strong> meaningful Code activity (Equivalent cost &ge; $10.00 OR active days &ge; 3).</td>
                   <td style="color: var(--accent-success); font-weight: 600;">Keep (Full Value)</td>
                 </tr>
                 <tr>
-                  <td><span class="pill chat">💬 Chat-Only Active</span></td>
+                  <td><span class="pill chat">&#55357;&#56492; Chat-Only Active</span></td>
                   <td>Active chat (&ge; 5 conversations in the last 30 days) <strong>AND</strong> no meaningful Code activity.</td>
                   <td style="color: var(--accent-primary); font-weight: 600;">Keep + Encourage Code adoption</td>
                 </tr>
                 <tr>
-                  <td><span class="pill code">⚡ Code-Only Active</span></td>
+                  <td><span class="pill code">&#9889; Code-Only Active</span></td>
                   <td>Meaningful Code activity (Equivalent cost &ge; $10.00 OR active days &ge; 3) <strong>AND</strong> minimal chat (&lt; 5 conversations).</td>
                   <td style="color: var(--accent-success); font-weight: 600;">Keep (Active Developer)</td>
                 </tr>
                 <tr>
-                  <td><span class="pill low">⚠️ Low Engagement</span></td>
+                  <td><span class="pill low">&#9888;&#65039; Low Engagement</span></td>
                   <td>Minor activity logged in Drive, but sits below the power/active thresholds in both channels.</td>
                   <td style="color: var(--accent-warning); font-weight: 600;">Review (Encourage training or evaluate)</td>
                 </tr>
                 <tr>
-                  <td><span class="pill inactive">❌ Truly Inactive</span></td>
+                  <td><span class="pill inactive">&#10060; Truly Inactive</span></td>
                   <td>Zero active chat sessions <strong>AND</strong> zero Code tokens logged in Google Drive.</td>
                   <td style="color: var(--accent-danger); font-weight: 600;">Remove (Reclaim license immediately)</td>
                 </tr>
@@ -552,7 +706,7 @@
         <div class="modal-grid-2">
           <div class="glass-card" style="border-color: rgba(239, 68, 68, 0.25); padding: 1.5rem;">
             <div class="chart-header" style="margin-bottom: 1rem;">
-              <h3 style="color: var(--accent-danger);"><i class="fa-solid fa-shield-halved"></i> 🛡️ The Handoff Safety Guard (Absolute Protection)</h3>
+              <h3 style="color: var(--accent-danger);"><i class="fa-solid fa-shield-halved"></i> &#55357;&#57057;&#65039; The Handoff Safety Guard (Absolute Protection)</h3>
             </div>
             <p style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
               To prevent wrongly flagging productive developers who work silently, the system enforces a strict <strong>Safety Guard</strong>.
@@ -563,7 +717,7 @@
 
           <div class="glass-card" style="border-color: rgba(245, 158, 11, 0.25); padding: 1.5rem;">
             <div class="chart-header" style="margin-bottom: 1rem;">
-              <h3 style="color: var(--accent-warning);"><i class="fa-solid fa-circle-dollar-to-slot"></i> 💵 Understanding Equivalent API Costs</h3>
+              <h3 style="color: var(--accent-warning);"><i class="fa-solid fa-circle-dollar-to-slot"></i> &#55357;&#56501; Understanding Equivalent API Costs</h3>
             </div>
             <p style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
               The cost figures shown on the dashboard represent the <strong>API-equivalent value</strong> (what the raw tokens would cost at commercial pay-as-you-go API rates for Sonnet, Opus, and Haiku).
@@ -578,7 +732,7 @@
 
   </div>
 
-  <!-- 👥 Project Contributors Modal -->
+  <!-- &#55357;&#56421; Project Contributors Modal -->
   <div class="modal-overlay" id="project-devs-modal">
     <div class="modal-content glass-card" style="max-width: 640px;">
       <div class="modal-header">
@@ -594,7 +748,7 @@
     </div>
   </div>
 
-  <!-- 🔍 Detailed User Modal Overlay -->
+  <!-- &#55357;&#56589; Detailed User Modal Overlay -->
   <div class="modal-overlay" id="user-detail-modal">
     <div class="modal-content glass-card">
       <div class="modal-header">
@@ -656,7 +810,7 @@
       <!-- Adoption Tips (shown for Chat-Only users) -->
       <div id="modal-tips-section" style="display:none; margin-top: 1rem;">
         <div class="glass-card" style="background:rgba(16,185,129,0.05); border-left: 3px solid var(--accent-success); padding: 1.25rem;">
-          <h4 style="font-size: 0.85rem; font-weight: 700; color: var(--accent-success); margin-bottom: 0.5rem;">Chat-Only User — Adoption Opportunity</h4>
+          <h4 style="font-size: 0.85rem; font-weight: 700; color: var(--accent-success); margin-bottom: 0.5rem;">Chat-Only User &#8212; Adoption Opportunity</h4>
           <p style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">This developer is actively using Claude for chat but hasn't yet adopted Claude Code for inline file editing and repo work. Encourage them to try: run <code style="background:rgba(255,255,255,0.06);padding:0.1rem 0.3rem;border-radius:3px;">claude</code> in a project folder to get started.</p>
         </div>
       </div>
@@ -722,6 +876,113 @@
             </table>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- &#55357;&#56514; Project Detail Modal (v2) -->
+  <div class="modal-overlay" id="project-detail-modal">
+    <div class="modal-content glass-card" style="max-width:760px;">
+      <div class="modal-header">
+        <div>
+          <h2 id="proj-detail-name" style="font-size:1.1rem;"><i class="fa-solid fa-code-branch" style="margin-right:0.5rem;color:var(--accent-success);"></i>Project Detail</h2>
+          <p id="proj-detail-subtitle" style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.2rem;"></p>
+        </div>
+        <button class="modal-close-btn" onclick="closeProjectDetailModal()">&times;</button>
+      </div>
+
+      <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:1rem;">
+        <div class="glass-card stat-card" style="padding:1rem;">
+          <div class="stat-header"><span>Total cost</span><i class="fa-solid fa-coins"></i></div>
+          <div class="stat-value" id="proj-detail-cost" style="font-size:1.4rem;">$0.00</div>
+        </div>
+        <div class="glass-card stat-card" style="padding:1rem;">
+          <div class="stat-header"><span>Sessions</span><i class="fa-solid fa-clock-rotate-left"></i></div>
+          <div class="stat-value" id="proj-detail-sessions" style="font-size:1.4rem;">0</div>
+        </div>
+        <div class="glass-card stat-card" style="padding:1rem;">
+          <div class="stat-header"><span>Contributors</span><i class="fa-solid fa-user-group"></i></div>
+          <div class="stat-value" id="proj-detail-devs" style="font-size:1.4rem;">0</div>
+        </div>
+        <div class="glass-card stat-card" style="padding:1rem;">
+          <div class="stat-header"><span>Cost / session</span><i class="fa-solid fa-divide"></i></div>
+          <div class="stat-value" id="proj-detail-cps" style="font-size:1.4rem;">$0.00</div>
+        </div>
+      </div>
+
+      <div class="glass-card" style="background:rgba(255,255,255,0.01);margin-bottom:1rem;">
+        <div class="chart-header"><h3>Top Contributors</h3></div>
+        <div id="proj-detail-contributors" style="max-height:240px;overflow-y:auto;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- &#55357;&#56538; Methodology Drawer (replaces sidebar Methodology tab) -->
+  <div class="modal-overlay" id="methodology-drawer">
+    <div class="modal-content glass-card" style="max-width:780px;">
+      <div class="modal-header">
+        <div>
+          <h2 style="font-size:1.1rem;"><i class="fa-solid fa-book-open" style="margin-right:0.5rem;color:var(--accent-primary);"></i>Methodology & Calculation Reference</h2>
+          <p style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.2rem;">v2 scoring model &#8212; <span id="methodology-version-tag">v2.0</span></p>
+        </div>
+        <button class="modal-close-btn" onclick="closeMethodologyDrawer()">&times;</button>
+      </div>
+
+      <div class="glass-card" style="background:rgba(37,99,235,0.05);border-left:3px solid var(--accent-primary);padding:1rem 1.25rem;margin-bottom:1rem;">
+        <div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:0.4rem;">Current run thresholds</div>
+        <div id="methodology-live-thresholds" style="font-size:0.85rem;color:var(--text-primary);line-height:1.6;">&#8230;</div>
+      </div>
+
+      <div class="glass-card" style="background:rgba(255,255,255,0.01);padding:1.25rem;margin-bottom:1rem;">
+        <h4 style="font-family:'Outfit';margin-bottom:0.5rem;color:var(--accent-success);"><i class="fa-solid fa-gauge-high"></i> Code Score (0&#8211;100)</h4>
+        <ul style="font-size:0.85rem;color:var(--text-secondary);line-height:1.7;list-style:none;padding-left:0;">
+          <li>&#55357;&#56629; <strong style="color:#fff;">Cost rank (30 pts)</strong> &#8212; last-30-day API-equivalent cost vs team max.</li>
+          <li>&#55357;&#57314; <strong style="color:#fff;">Active days (30 pts)</strong> &#8212; distinct active days (with cost or tokens), vs team max.</li>
+          <li>&#55357;&#57313; <strong style="color:#fff;">Output tokens (20 pts)</strong> &#8212; actual artifact volume generated, vs team max.</li>
+          <li>&#55357;&#57315; <strong style="color:#fff;">Project diversity (10 pts)</strong> &#8212; distinct real projects worked on.</li>
+          <li>&#55357;&#56628; <strong style="color:#fff;">Cache hit rate (10 pts)</strong> &#8212; input-side cache reuse (efficient prompting).</li>
+        </ul>
+        <p style="font-size:0.78rem;color:var(--text-muted);margin-top:0.5rem;">v1 used token-volume (40%) which rewarded verbose prompts. v2 swaps in cost-rank + output to reward outcomes.</p>
+      </div>
+
+      <div class="glass-card" style="background:rgba(255,255,255,0.01);padding:1.25rem;margin-bottom:1rem;">
+        <h4 style="font-family:'Outfit';margin-bottom:0.5rem;color:var(--accent-primary);"><i class="fa-solid fa-comments"></i> Ad-hoc Adoption Score (replaces Chat Score)</h4>
+        <p style="font-size:0.85rem;color:var(--text-secondary);line-height:1.6;">Number of sessions classified as the <em>ad-hoc CLI</em> bucket (no recognizable project context). v1 derived this from <code>totalSessions &#8722; distinctProjects</code> &#8212; an algebraic fiction that has no semantic meaning. v2 counts ad-hoc sessions honestly.</p>
+      </div>
+
+      <div class="glass-card" style="background:rgba(255,255,255,0.01);padding:1.25rem;margin-bottom:1rem;">
+        <h4 style="font-family:'Outfit';margin-bottom:0.5rem;color:var(--accent-warning);"><i class="fa-solid fa-scale-balanced"></i> Value Score</h4>
+        <p style="font-size:0.85rem;color:var(--text-secondary);line-height:1.6;"><code>max(code, chat) + min(code, chat) &#215; 0.2</code>, capped at 100. v1's <code>(code + chat) / 2 + 10</code> penalized balance (50/50 scored lower than 100/0). v2 rewards the dominant channel with a small hybrid bonus.</p>
+      </div>
+
+      <div class="glass-card" style="background:rgba(255,255,255,0.01);padding:1.25rem;margin-bottom:1rem;">
+        <h4 style="font-family:'Outfit';margin-bottom:0.5rem;color:var(--text-primary);"><i class="fa-solid fa-tags"></i> Categories</h4>
+        <ul style="font-size:0.82rem;color:var(--text-secondary);line-height:1.7;list-style:none;padding-left:0;">
+          <li>&#55356;&#57137; <strong style="color:#fff;">Onboarding</strong> &#8212; first observed activity less than 14 days ago.</li>
+          <li>&#11088; <strong style="color:#fff;">Power User</strong> &#8212; recent activity (&#8804;30d) AND last-30d cost &#8805; $5 OR &#8805;3 active days in last 30.</li>
+          <li>&#55357;&#56492; <strong style="color:#fff;">Chat-Only Active</strong> &#8212; recent (&#8804;30d) + &#8805;5 total sessions but no recent code activity.</li>
+          <li>&#9889; <strong style="color:#fff;">Code-Only Active</strong> &#8212; has had meaningful code activity but not in the last 30 days.</li>
+          <li>&#9888;&#65039; <strong style="color:#fff;">Low Engagement</strong> &#8212; some lifetime tokens but below power thresholds.</li>
+          <li>&#10060; <strong style="color:#fff;">Truly Inactive</strong> &#8212; zero lifetime tokens captured.</li>
+        </ul>
+      </div>
+
+      <div class="glass-card" style="background:rgba(255,255,255,0.01);padding:1.25rem;margin-bottom:1rem;">
+        <h4 style="font-family:'Outfit';margin-bottom:0.5rem;color:var(--accent-secondary);"><i class="fa-solid fa-shield-halved"></i> Reclamation confidence (0&#8211;100)</h4>
+        <p style="font-size:0.85rem;color:var(--text-secondary);line-height:1.6;">Computed from days-since-last-activity + lifetime activity + new-hire status. Replaces v1's hard-coded "99% High / 80% Medium" pills. New hires &lt; 14 days old are always 0 (never flagged for removal).</p>
+      </div>
+
+      <div class="glass-card" style="background:rgba(245,158,11,0.05);border-left:3px solid var(--accent-warning);padding:1rem 1.25rem;">
+        <strong style="color:var(--accent-warning);font-size:0.85rem;">&#9888;&#65039; Caveat:</strong>
+        <p style="font-size:0.82rem;color:var(--text-secondary);line-height:1.6;margin-top:0.3rem;margin-bottom:0;">All <em>cost</em> figures are the API-equivalent value of the tokens consumed (what they would cost at commercial pay-as-you-go rates). Actual money spent is the flat $20/user/month subscription. ROI shown is the ratio of the former to the latter, restricted to the last 30 days so monthly comparisons are honest.</p>
+      </div>
+
+      <div class="glass-card" style="background:rgba(255,255,255,0.01);padding:1rem 1.25rem;margin-top:1rem;">
+        <h4 style="font-family:'Outfit';margin-bottom:0.5rem;font-size:0.95rem;"><i class="fa-solid fa-clock-rotate-left"></i> Methodology Changelog</h4>
+        <ul style="font-size:0.78rem;color:var(--text-secondary);line-height:1.6;list-style:none;padding-left:0;">
+          <li><strong style="color:#fff;">v2.0</strong> &#8212; Period-aware ROI (30d window). Code Score re-weighted (cost+output replaces raw tokens). Chat Score redefined as Ad-hoc Adoption. Tenure-aware categorization (Onboarding). Computed reclamation confidence. Input-side cache hit rate.</li>
+          <li><strong style="color:#fff;">v1</strong> &#8212; Lifetime ROI, token-volume-weighted Code Score, <code>totalSessions &#8722; distinctProjects</code> Chat Score, hard-coded confidence pills.</li>
+        </ul>
       </div>
     </div>
   </div>

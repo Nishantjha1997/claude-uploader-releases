@@ -38,7 +38,7 @@ const IS_LINUX = process.platform === 'linux';
 const PLATFORM_KEY = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
 
 // -------------------- CONFIGURATION --------------------
-const VERSION = '2.0.1';
+const VERSION = '2.0.2';
 const FORCE_RUN = process.argv.includes('--force');
 
 // -------------------- SERVICE LOOP INTERVALS --------------------
@@ -1607,7 +1607,7 @@ async function serviceLoop(cfg) {
       }
 
       if (isPausedState) {
-        await sendPing(cfg.name, 'WAITING_PAUSED', `v${VERSION} paused`, pingExtra({ nextPollAt }));
+        // Idle while paused - no redundant pings
       } else if (trigger.type === 'PING') {
         await sendPing(cfg.name, 'PONG', `v${VERSION} online`, pingExtra({ nextPollAt }));
         log('PONG sent');
@@ -1625,8 +1625,6 @@ async function serviceLoop(cfg) {
           log('Update applied — exiting for replacement by launcher');
           process.exit(0);
         }
-      } else {
-        await sendPing(cfg.name, 'WAITING', `v${VERSION} idle`, pingExtra({ nextPollAt }));
       }
     } catch (e) {
       log(`Poll loop error: ${e.message}`);

@@ -1,6 +1,6 @@
 <style>
 :root {
-  /* 🎨 Premium Obsidian Glass Theme Variables */
+  /* &#55356;&#57256; Premium Obsidian Glass Theme Variables */
   --bg: #060709;
   --bg2: #080B14;
   --bg3: rgba(10, 13, 23, 0.92);
@@ -504,7 +504,7 @@ select option{background:var(--bg2);color:var(--t1)}
 .hotpatch-btn:disabled{opacity:0.5;cursor:not-allowed;background:transparent;color:var(--t3);border-color:var(--glass-b);box-shadow:none}
 
 /* =========================================================
-   THEME SYSTEM — overrides every surface, text, glow token
+   THEME SYSTEM &#8212; overrides every surface, text, glow token
    ========================================================= */
 
 /* -- Obsidian Emerald ------------------------------------ */
@@ -653,7 +653,7 @@ body[data-theme] .nav-item.active {
 }
 
 /* ==========================================================================
-   🌌 AMBIENT BACKGROUND LAYER
+   &#55356;&#57100; AMBIENT BACKGROUND LAYER
    ========================================================================== */
 body {
   position: relative;
@@ -740,7 +740,7 @@ body[data-theme="synthwave"] .orb-2 { background: radial-gradient(circle, #ec489
 body[data-theme="synthwave"] .orb-3 { background: radial-gradient(circle, #38bdf8 0%, rgba(0,0,0,0) 70%); }
 
 /* ==========================================================================
-   ✨ FLOATING PARTICLE FIELD
+   &#10024; FLOATING PARTICLE FIELD
    ========================================================================== */
 .particle-field {
   position: absolute;
@@ -755,7 +755,7 @@ body[data-theme="synthwave"] .orb-3 { background: radial-gradient(circle, #38bdf
   animation: particleDrift linear infinite;
 }
 
-/* 18 particles — varied size, position, speed */
+/* 18 particles &#8212; varied size, position, speed */
 .particle-field span:nth-child(1)  { width:2px; height:2px; left:8%;   bottom:5%;  animation-duration:28s; animation-delay:0s;  }
 .particle-field span:nth-child(2)  { width:3px; height:3px; left:15%;  bottom:10%; animation-duration:22s; animation-delay:-4s; background:rgba(99,179,237,0.6); }
 .particle-field span:nth-child(3)  { width:2px; height:2px; left:22%;  bottom:3%;  animation-duration:35s; animation-delay:-9s; }
@@ -776,7 +776,7 @@ body[data-theme="synthwave"] .orb-3 { background: radial-gradient(circle, #38bdf
 .particle-field span:nth-child(18) { width:3px; height:3px; left:38%;  bottom:60%; animation-duration:23s; animation-delay:-15s; background:rgba(245,158,11,0.3); }
 
 /* ==========================================================================
-   ⏳ PREMIUM LOADING SCREEN
+   &#9203; PREMIUM LOADING SCREEN
    ========================================================================== */
 #loading {
   position: fixed;
@@ -905,7 +905,7 @@ body[data-theme="synthwave"] .orb-3 { background: radial-gradient(circle, #38bdf
 .loader-ring  { display: none !important; }
 
 /* ==========================================================================
-   ✨ ENHANCED ACTIVE NAV ITEM
+   &#10024; ENHANCED ACTIVE NAV ITEM
    ========================================================================== */
 .nav-item.active {
   animation: breathGlow 3s ease-in-out infinite alternate;
@@ -926,7 +926,7 @@ body[data-theme="synthwave"] .orb-3 { background: radial-gradient(circle, #38bdf
 }
 
 /* ==========================================================================
-   📋 STAGGERED TABLE ROW SLIDE-IN
+   &#55357;&#56523; STAGGERED TABLE ROW SLIDE-IN
    ========================================================================== */
 .data-table tbody tr {
   opacity: 0;
@@ -946,7 +946,7 @@ body[data-theme="synthwave"] .orb-3 { background: radial-gradient(circle, #38bdf
 .data-table tbody tr:nth-child(10) { animation-delay: 0.40s; }
 
 /* ==========================================================================
-   🎬 ALL NEW KEYFRAMES
+   &#55356;&#57260; ALL NEW KEYFRAMES
    ========================================================================== */
 @keyframes ambientFloat {
   0%   { transform: translate(0, 0) scale(1) rotate(0deg); }
@@ -1009,12 +1009,48 @@ body[data-theme="synthwave"] .orb-3 { background: radial-gradient(circle, #38bdf
 }
 
 /* ==========================================================================
-   🖨️ PRINT
+   &#55357;&#56744;&#65039; PRINT
    ========================================================================== */
 @media print {
   .ambient-background, #loading { display: none !important; }
   .app-shell { position: static; }
 }
+
+/* &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472; v2 ADDITIONS &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472; */
+
+/* Mobile hamburger &#8212; visible only when the sidebar is in its collapsed/hidden state */
+.mobile-menu-btn { padding: 4px 10px; font-size: 18px; line-height: 1; }
+@media (max-width: 720px) {
+  .mobile-menu-btn { display: inline-flex !important; }
+  /* Slide the sidebar fully off-screen by default at this width */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    z-index: 8500;
+    width: 240px !important;
+    box-shadow: 8px 0 32px rgba(0,0,0,0.4);
+  }
+  .sidebar.mobile-open { transform: translateX(0); }
+  .sidebar.mobile-open .sidebar-brand-text,
+  .sidebar.mobile-open .sidebar-brand-sub,
+  .sidebar.mobile-open .nav-item span:not(.nav-icon),
+  .sidebar.mobile-open .nav-label,
+  .sidebar.mobile-open .sidebar-footer span { display: inline !important; }
+  .sidebar.mobile-open .sidebar-brand { justify-content: flex-start; padding: 20px 18px; }
+  .sidebar.mobile-open .sidebar-brand img { width: auto; max-width: 160px; height: 40px; }
+  .main-area { margin-left: 0 !important; width: 100% !important; }
+  .kpi-strip { grid-template-columns: 1fr 1fr !important; }
+}
+
+#headlineInsight { transition: border-left-color 0.3s ease; }
+#toast.show.warn { background: rgba(245,158,11,0.92); color: #1f2937; }
+#onboardingStrip > div { animation: v2FadeSlide 0.35s ease; }
+@keyframes v2FadeSlide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+#versionDriftKpi span { margin-bottom: 0.3rem; }
+#complianceTrendChart svg { display: block; }
+#queueBulkBar { animation: v2FadeSlide 0.2s ease; }
 
 </style>
 

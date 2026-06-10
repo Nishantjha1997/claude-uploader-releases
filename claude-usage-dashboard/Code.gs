@@ -32,7 +32,7 @@ function include(filename) {
  */
 function getDashboardData(forceRefresh) {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'claude_dashboard_data_v6';
+  var cacheKey = 'claude_dashboard_data_v7';
 
   if (!forceRefresh) {
     var cached = getLargeCache(cache, cacheKey);
@@ -63,7 +63,7 @@ function getDashboardData(forceRefresh) {
  */
 function clearDashboardCache() {
   var cache = CacheService.getScriptCache();
-  var cacheKey = 'claude_dashboard_data_v6';
+  var cacheKey = 'claude_dashboard_data_v7';
   
   try {
     var meta = cache.get(cacheKey + '_meta');
@@ -144,6 +144,13 @@ function performDriveScan() {
     folder = DriveApp.getFolderById(SHARED_DRIVE_FOLDER_ID);
   } catch (e) {
     throw new Error('Could not access Google Drive Shared Folder. Please make sure the folder ID is correct and you have access. Details: ' + e.message);
+  }
+
+  // Merge admin-managed REAL_PROJECTS extras (Script Properties) into the
+  // in-code defaults so admins can promote a project name without redeploying.
+  var extras = getProjectAllowlistExtras();
+  for (var ei = 0; ei < extras.length; ei++) {
+    if (REAL_PROJECTS.indexOf(extras[ei]) === -1) REAL_PROJECTS.push(extras[ei]);
   }
 
   // Restore getFiles() to guarantee Shared Drive root listing support, which is not supported by folder.searchFiles()
@@ -239,16 +246,20 @@ function performDriveScan() {
     var modelsUsedMap = {};
     var modelCostsMap = {};
     var lastActivity = '';
+    var firstSeen = '';
     var userProjects = [];
     var userProjectsMap = {};
     var totalSessions = 0;
     var userSessionsList = [];
+    // Per-day cost map for this user — drives period-aware ROI math
+    // and the per-user mini-trends on the Trends page.
+    var userDailyCostMap = {};
 
     // Process Daily Data
     if (dailyData) {
       var rawDaily = dailyData.daily || dailyData.day || [];
       dailyList = rawDaily;
-      
+
       // Calculate totals if totals object is missing
       var totals = dailyData.totals || {};
       inputTokens = totals.inputTokens || 0;
@@ -259,25 +270,30 @@ function performDriveScan() {
       totalCost = totals.totalCost || totals.cost || 0;
 
       rawDaily.forEach(function(day) {
-        var dateStr = day.date || day.period || '';
-        if (dateStr) {
+        var dateStr = normalizeDate(day.date || day.period || '');
+        var dayCost = day.totalCost || day.cost || 0;
+        var dayTokens = day.totalTokens || 0;
+        // Only count a day as "active" when there's real activity (not a zero-row).
+        var hasActivity = dayCost > 0 || dayTokens > 0;
+        if (dateStr && hasActivity) {
           activeDays++;
-          if (dateStr > lastActivity) {
-            lastActivity = dateStr;
-          }
-          
+          if (dateStr > lastActivity) lastActivity = dateStr;
+          if (!firstSeen || dateStr < firstSeen) firstSeen = dateStr;
+
+          userDailyCostMap[dateStr] = (userDailyCostMap[dateStr] || 0) + dayCost;
+
           // Timeseries mapping
           if (!dailyTimeSeriesMap[dateStr]) {
             dailyTimeSeriesMap[dateStr] = { date: dateStr, totalCost: 0, totalTokens: 0, devCount: 0, devs: {} };
           }
-          dailyTimeSeriesMap[dateStr].totalCost += (day.totalCost || day.cost || 0);
-          dailyTimeSeriesMap[dateStr].totalTokens += (day.totalTokens || 0);
+          dailyTimeSeriesMap[dateStr].totalCost += dayCost;
+          dailyTimeSeriesMap[dateStr].totalTokens += dayTokens;
           if (!dailyTimeSeriesMap[dateStr].devs[devName]) {
             dailyTimeSeriesMap[dateStr].devs[devName] = true;
             dailyTimeSeriesMap[dateStr].devCount++;
           }
         }
-        
+
         // Model usage mapping
         var models = day.modelsUsed || [];
         models.forEach(function(m) {
@@ -289,18 +305,24 @@ function performDriveScan() {
           var modelName = mb.modelName || mb.name || '';
           if (modelName) {
             modelCostsMap[modelName] = (modelCostsMap[modelName] || 0) + (mb.cost || 0);
-            
+
             if (!modelBreakdownOrg[modelName]) {
-              modelBreakdownOrg[modelName] = { cost: 0, tokens: 0, sessions: 0 };
+              modelBreakdownOrg[modelName] = { cost: 0, tokens: 0, sessions: 0, byDate: {} };
             }
             modelBreakdownOrg[modelName].cost += (mb.cost || 0);
             modelBreakdownOrg[modelName].tokens += (mb.inputTokens || 0) + (mb.outputTokens || 0) + (mb.cacheCreationTokens || 0) + (mb.cacheReadTokens || 0);
+            // Time series for Models page stacked-area chart
+            if (dateStr) {
+              modelBreakdownOrg[modelName].byDate[dateStr] = (modelBreakdownOrg[modelName].byDate[dateStr] || 0) + (mb.cost || 0);
+            }
           }
         });
       });
     }
 
     // Process Session Data
+    var adhocSessionCount = 0;
+    var realProjectSessionCount = 0;
     if (sessionData) {
       var rawSessions = sessionData.sessions || sessionData.session || [];
       totalSessions = rawSessions.length;
@@ -310,9 +332,11 @@ function performDriveScan() {
         var classified = classifyProject(rawProjName);
         var cleanProjName = classified.displayName;
         var projKind = classified.kind;
+        if (projKind === 'adhoc') adhocSessionCount++;
+        else if (projKind === 'project') realProjectSessionCount++;
         var sCost = session.totalCost || session.cost || 0;
         var sTokens = session.totalTokens || 0;
-        var sLastActivity = (session.metadata && session.metadata.lastActivity) || session.lastActivity || '';
+        var sLastActivity = normalizeDate((session.metadata && session.metadata.lastActivity) || session.lastActivity || '');
 
         if (sLastActivity && sLastActivity > lastActivity) {
           lastActivity = sLastActivity;
@@ -322,7 +346,7 @@ function performDriveScan() {
         if (session.modelsUsed && session.modelsUsed.length === 1 && sCost > 0) {
           var mName = session.modelsUsed[0];
           if (!modelBreakdownOrg[mName]) {
-            modelBreakdownOrg[mName] = { cost: 0, tokens: 0, sessions: 0 };
+            modelBreakdownOrg[mName] = { cost: 0, tokens: 0, sessions: 0, byDate: {} };
           }
           modelBreakdownOrg[mName].cost += sCost;
           modelBreakdownOrg[mName].tokens += sTokens;
@@ -391,10 +415,15 @@ function performDriveScan() {
       return p.kind === 'project';
     }).length;
 
-    var cacheHitRate = totalTokens > 0 ? (cacheReadTokens / totalTokens) * 100 : 0;
+    // Input-side cache hit rate — denominator excludes output tokens (which
+    // can never be cache reads). This is the industry-standard metric.
+    var inputSideTokens = inputTokens + cacheCreationTokens + cacheReadTokens;
+    var cacheHitRate = inputSideTokens > 0 ? (cacheReadTokens / inputSideTokens) * 100 : 0;
     var primaryModel = getPrimaryModelFromMap(modelsUsedMap);
     var activityLevel = activeDays >= 20 ? 'Heavy' : (activeDays >= 10 ? 'Moderate' : (activeDays >= 3 ? 'Light' : 'Minimal'));
 
+    // Period-aware cost sums — computed after we know the global maxDate (see
+    // post-loop section); stash raw daily map here for now.
     users.push({
       name: devName,
       email: devInfo.email,
@@ -409,19 +438,22 @@ function performDriveScan() {
       cacheHitRate: cacheHitRate,
       activeDays: activeDays,
       totalSessions: totalSessions,
+      adhocSessions: adhocSessionCount,
+      realProjectSessions: realProjectSessionCount,
       distinctProjects: realProjectCount,
       lastActivity: lastActivity || 'N/A',
+      firstSeen: firstSeen || '',
       primaryModel: primaryModel,
       activityLevel: activityLevel,
       projects: userProjects,
       modelsUsed: Object.keys(modelsUsedMap),
       modelCostBreakdown: modelCostsMap,
-      roiIndex: (totalCost / LICENSE_COST_MONTHLY) * 100,
+      _dailyCostMap: userDailyCostMap, // private — used for period sums + per-user mini-trends, slimmed later
       dailyHistory: (dailyData ? (dailyData.daily || dailyData.day || []) : []).slice(-30).map(function(d) {
-        return { date: d.period || d.date || '', cost: d.totalCost || d.cost || 0 };
+        return { date: normalizeDate(d.period || d.date || ''), cost: d.totalCost || d.cost || 0 };
       }),
       recentSessions: userSessionsList.slice().sort(function(a, b) {
-        return b.date.localeCompare(a.date);
+        return (b.date || '').localeCompare(a.date || '');
       }).slice(0, 30)
     });
 
@@ -431,62 +463,118 @@ function performDriveScan() {
     if (realProjectCount > maxProjects) maxProjects = realProjectCount;
   }
 
-  // Step 3: Compute Values, Scores & Recommendations
+  // Step 2.5: Determine the global reporting "anchor date" (the latest date
+  // present anywhere in the org's daily data). Period windows are computed
+  // relative to this anchor so dashboards stay coherent even if the most
+  // recent uploader run is a few days behind real-time.
+  var globalDateKeys = Object.keys(dailyTimeSeriesMap).sort();
+  var anchorDate = globalDateKeys.length > 0 ? globalDateKeys[globalDateKeys.length - 1] : todayISTDate();
+  var window30 = buildDateWindow(anchorDate, 30);
+  var windowPrior30 = buildDateWindow(addDays(anchorDate, -30), 30);
+  var thisMonthPrefix = anchorDate.substring(0, 7);
+
+  // Per-user period sums + tenure-derived rank metrics
+  var maxCost30d = 0;
+  var maxOutputTokens = 0;
+  users.forEach(function(user) {
+    var costLast30d = 0;
+    var costPriorPeriod = 0;
+    var costThisMonth = 0;
+    var activeDays30d = 0;
+    var dailyMap = user._dailyCostMap || {};
+    for (var d in dailyMap) {
+      var c = dailyMap[d];
+      if (window30.has[d]) { costLast30d += c; activeDays30d++; }
+      if (windowPrior30.has[d]) costPriorPeriod += c;
+      if (d.indexOf(thisMonthPrefix) === 0) costThisMonth += c;
+    }
+    user.costAllTime = user.totalCost || 0;
+    user.costLast30d = costLast30d;
+    user.costPriorPeriod = costPriorPeriod;
+    user.costThisMonth = costThisMonth;
+    user.activeDays30d = activeDays30d;
+    user.costDeltaPct = costPriorPeriod > 0
+      ? ((costLast30d - costPriorPeriod) / costPriorPeriod) * 100
+      : (costLast30d > 0 ? 100 : 0);
+    user.roiIndex = (costLast30d / LICENSE_COST_MONTHLY) * 100;
+
+    user.tenureDays = user.firstSeen ? Math.max(0, daysBetween(user.firstSeen, anchorDate)) : 0;
+    user.isNewHire = user.firstSeen && user.tenureDays < 14;
+
+    if (costLast30d > maxCost30d) maxCost30d = costLast30d;
+    if ((user.outputTokens || 0) > maxOutputTokens) maxOutputTokens = (user.outputTokens || 0);
+  });
+
+  // Minimum-denominator floors prevent a single-user team from auto-pinning
+  // every component to 100. Floors roughly correspond to the "Light" tier.
+  var floorCost30d = Math.max(maxCost30d, 20);
+  var floorOutputTokens = Math.max(maxOutputTokens, 100000);
+  var floorActiveDays = Math.max(maxActiveDays, 5);
+  var floorProjects = Math.max(maxProjects, 2);
+
+  // Step 3: Compute Scores, Categorization & Recommendations
   var activeUsersCount = 0;
   var totalCodeCost = 0;
+  var totalCodeCost30d = 0;
+  var totalCodeCostPrior = 0;
   var totalCodeTokens = 0;
   var wastedSavings = 0;
 
   users.forEach(function(user) {
-    // 3a. Calculate Code Score
-    var tokenScore = maxCodeTokens > 0 ? (user.totalTokens / maxCodeTokens) * 40 : 0;
-    var activeDaysScore = maxActiveDays > 0 ? (user.activeDays / maxActiveDays) * 30 : 0;
-    var projectDiversityScore = maxProjects > 0 ? (user.distinctProjects / maxProjects) * 20 : 0;
-    
-    // Efficiency: Output tokens relative to total input tokens (input + cache creation)
-    var inputDenominator = user.inputTokens + user.cacheCreationTokens;
-    var efficiencyRatio = inputDenominator > 0 ? (user.outputTokens / inputDenominator) : 0;
-    var efficiencyScore = efficiencyRatio > 0 ? Math.min(10, efficiencyRatio * 2) : 0; // Cap at 10%
-    
-    var codeScore = tokenScore + activeDaysScore + projectDiversityScore + efficiencyScore;
-    user.codeScore = Math.min(100, Math.round(codeScore * 10) / 10);
-    
-    // 3b. Derive Chat Score
-    // Since uploader files represent Claude Code CLI usage, the interactive cli chat sessions
-    // are those containing some haiku/opus commands or CLI shell usage.
-    // We compute a synthetic Chat Score (0-100) based on interactive sessions count
-    var cliSessions = user.totalSessions - user.distinctProjects;
-    var chatScore = cliSessions > 0 ? Math.min(100, (cliSessions / 10) * 100) : 0;
-    user.chatScore = Math.round(chatScore * 10) / 10;
-    
-    // 3c. Calculate Overall Value Score
-    var overallValue = 0;
-    if (user.chatScore > 0 && user.codeScore > 0) {
-      overallValue = ((user.chatScore + user.codeScore) / 2) + 10; // 10% bonus for hybrid activity
-    } else {
-      overallValue = Math.max(user.chatScore, user.codeScore);
-    }
+    // 3a. Code Score (v2) — rewards outcome, not raw token volume.
+    //   30 pts  cost-rank in last 30 days  (business value)
+    //   30 pts  active-days                (consistency)
+    //   20 pts  output-tokens rank          (artifact volume)
+    //   10 pts  project-diversity
+    //   10 pts  input-side cache hit rate
+    var costRankScore = (user.costLast30d / floorCost30d) * 30;
+    var activeDaysScore = (user.activeDays / floorActiveDays) * 30;
+    var outputScore = ((user.outputTokens || 0) / floorOutputTokens) * 20;
+    var projectDiversityScore = (user.distinctProjects / floorProjects) * 10;
+    var cacheScore = ((user.cacheHitRate || 0) / 100) * 10;
+    var codeScore = Math.min(100, Math.max(0,
+      costRankScore + activeDaysScore + outputScore + projectDiversityScore + cacheScore
+    ));
+    user.codeScore = Math.round(codeScore * 10) / 10;
+
+    // 3b. Ad-hoc Adoption Score (formerly Chat Score) — counts sessions
+    // classified as the 'adhoc' bucket. Replaces v1's broken
+    // totalSessions - distinctProjects formula. Field name kept as
+    // chatScore for backward compatibility with existing UI.
+    var adhocScore = user.adhocSessions > 0
+      ? Math.min(100, (user.adhocSessions / 10) * 100)
+      : 0;
+    user.chatScore = Math.round(adhocScore * 10) / 10;
+
+    // 3c. Value Score — asymmetric blend that rewards a strong primary
+    // channel and adds a modest bonus for hybrid (code + ad-hoc) usage.
+    // Replaces v1's (a+b)/2+10 formula where balance was penalized.
+    var primary = Math.max(user.codeScore, user.chatScore);
+    var secondary = Math.min(user.codeScore, user.chatScore);
+    var overallValue = primary + secondary * 0.2;
     user.valueScore = Math.min(100, Math.round(overallValue * 10) / 10);
 
-    // 3d. User Categorization & Licensing Recommendations
-    var isRecent = isRecentActivity(user.lastActivity);
-    var hasCodeCodeActivity = user.totalCost >= 10.00 || user.activeDays >= 3;
+    // 3d. User Categorization (period-aware, tenure-aware)
+    var isRecent = isRecentActivity(user.lastActivity, anchorDate);
+    var hasCodeActivity = user.costLast30d >= 5.00 || user.activeDays30d >= 3;
 
-    if (isRecent && hasCodeCodeActivity) {
-      user.category = ' Power User';
-      user.recommendation = 'Keep - Power user (Chat + Code)';
+    if (user.isNewHire) {
+      user.category = '🌱 Onboarding';
+      user.recommendation = 'New hire — give it 14 days before evaluating';
       activeUsersCount++;
-    } else if (isRecent && user.totalSessions >= 5 && !hasCodeCodeActivity) {
-      user.category = ' Chat-Only Active';
+    } else if (isRecent && hasCodeActivity) {
+      user.category = '⭐ Power User';
+      user.recommendation = 'Keep - Power user (Code + Ad-hoc)';
+      activeUsersCount++;
+    } else if (isRecent && user.totalSessions >= 5 && !hasCodeActivity) {
+      user.category = '💬 Chat-Only Active';
       user.recommendation = 'Keep + Encourage Code adoption';
       activeUsersCount++;
-    } else if (hasCodeCodeActivity && !isRecent) {
-      // Meaningful historical usage but inactive recently
+    } else if (hasCodeActivity && !isRecent) {
       user.category = '⚡ Code-Only Active';
       user.recommendation = 'Keep - Active developer';
       activeUsersCount++;
     } else if (user.totalTokens > 0) {
-      // Has some minor usage but below power thresholds
       user.category = '⚠️ Low Engagement';
       user.recommendation = 'Review - Training or Re-evaluate';
       activeUsersCount++;
@@ -496,7 +584,15 @@ function performDriveScan() {
       wastedSavings += LICENSE_COST_MONTHLY;
     }
 
+    // Reclamation confidence — replaces v1's hard-coded "99% High / 80% Medium"
+    user.reclamationConfidence = computeReclamationConfidence(user, anchorDate);
+
+    // Slim the payload — the per-day map is only needed server-side.
+    delete user._dailyCostMap;
+
     totalCodeCost += user.totalCost;
+    totalCodeCost30d += user.costLast30d;
+    totalCodeCostPrior += user.costPriorPeriod;
     totalCodeTokens += user.totalTokens;
   });
 
@@ -516,83 +612,106 @@ function performDriveScan() {
     });
   }
 
-  // Build a rolling 30-day linear chronological timeline from the maximum date found
-  var dailyTimeSeriesList = [];
-  var dates = Object.keys(dailyTimeSeriesMap);
-  var maxDateStr = '';
-  if (dates.length > 0) {
-    dates.sort();
-    maxDateStr = dates[dates.length - 1];
-  } else {
-    var now = new Date();
-    maxDateStr = Utilities.formatDate(now, 'Asia/Kolkata', 'yyyy-MM-dd');
-  }
-
-  try {
-    var parts = maxDateStr.split('-');
-    var maxYear = parseInt(parts[0], 10);
-    var maxMonth = parseInt(parts[1], 10) - 1;
-    var maxDay = parseInt(parts[2], 10);
-    var maxDateObj = new Date(maxYear, maxMonth, maxDay, 12, 0, 0);
-
-    for (var i = 29; i >= 0; i--) {
-      var d = new Date(maxDateObj.getTime());
-      d.setDate(maxDateObj.getDate() - i);
-      
-      var year = d.getFullYear();
-      var month = ('0' + (d.getMonth() + 1)).slice(-2);
-      var dateDay = ('0' + d.getDate()).slice(-2);
-      var dateString = year + '-' + month + '-' + dateDay;
-
+  // Build chronological timelines:
+  // - dailyTimeSeries: last 90 days (Trends page needs the wider window)
+  // - last30Series: the most recent 30 days (Executive Summary chart)
+  // Padded with zero-rows where no activity. devs map is stripped before
+  // returning to keep the payload slim.
+  function buildSeriesEndingAt(endDateStr, lengthDays) {
+    var out = [];
+    for (var i = lengthDays - 1; i >= 0; i--) {
+      var dateString = addDays(endDateStr, -i);
       if (dailyTimeSeriesMap[dateString]) {
-        dailyTimeSeriesList.push(dailyTimeSeriesMap[dateString]);
-      } else {
-        dailyTimeSeriesList.push({
-          date: dateString,
-          totalCost: 0,
-          totalTokens: 0,
-          devCount: 0,
-          devs: {}
+        var d = dailyTimeSeriesMap[dateString];
+        out.push({
+          date: d.date,
+          totalCost: d.totalCost,
+          totalTokens: d.totalTokens,
+          devCount: d.devCount
         });
+      } else {
+        out.push({ date: dateString, totalCost: 0, totalTokens: 0, devCount: 0 });
       }
     }
-  } catch (err) {
-    // Fallback to simple sorting if date parsing fails
-    for (var dateStr in dailyTimeSeriesMap) {
-      dailyTimeSeriesList.push(dailyTimeSeriesMap[dateStr]);
+    return out;
+  }
+  var dailyTimeSeriesList = buildSeriesEndingAt(anchorDate, 90);
+  var last30Series = dailyTimeSeriesList.slice(-30);
+
+  // Convert modelBreakdown byDate maps to ordered arrays matching the 90-day window
+  for (var mName in modelBreakdownOrg) {
+    var mData = modelBreakdownOrg[mName];
+    var byDateArr = [];
+    for (var di = 0; di < dailyTimeSeriesList.length; di++) {
+      var dStr = dailyTimeSeriesList[di].date;
+      byDateArr.push({ date: dStr, cost: (mData.byDate && mData.byDate[dStr]) || 0 });
     }
-    dailyTimeSeriesList.sort(function(a, b) {
-      return a.date.localeCompare(b.date);
-    });
+    mData.byDateSeries = byDateArr;
+    delete mData.byDate;
   }
 
-  var totalLicenses = users.length; // Active developers in Drive represent the roster
+  // Maximum uploader-file mtime across all developers — used by the client
+  // to show a "newer data available" pill when the cached payload is stale.
+  var maxFileMtimeMs = 0;
+  for (var dName in developerFiles) {
+    var di = developerFiles[dName];
+    if (di.dailyModified && di.dailyModified.getTime() > maxFileMtimeMs) maxFileMtimeMs = di.dailyModified.getTime();
+    if (di.sessionModified && di.sessionModified.getTime() > maxFileMtimeMs) maxFileMtimeMs = di.sessionModified.getTime();
+  }
+
+  var totalLicenses = users.length;
   var licenseUtilization = totalLicenses > 0 ? (activeUsersCount / totalLicenses) * 100 : 0;
-  
+
+  // Input-side cache hit rate (org-wide): denominator excludes output tokens.
+  var orgInputSide = 0;
+  var orgCacheRead = 0;
+  users.forEach(function(u) {
+    orgInputSide += (u.inputTokens || 0) + (u.cacheCreationTokens || 0) + (u.cacheReadTokens || 0);
+    orgCacheRead += (u.cacheReadTokens || 0);
+  });
+  var overallCacheHitRate = orgInputSide > 0 ? (orgCacheRead / orgInputSide) * 100 : 0;
+
+  // Period-aware ROI: lifetime ROI is misleading (grows with fleet history),
+  // so the canonical KPI uses last 30 days. costAllTime is kept for reference.
+  var roiIndex30d = (totalCodeCost30d / Math.max(totalLicenses * LICENSE_COST_MONTHLY, 1)) * 100;
+  var costDeltaPct = totalCodeCostPrior > 0
+    ? ((totalCodeCost30d - totalCodeCostPrior) / totalCodeCostPrior) * 100
+    : (totalCodeCost30d > 0 ? 100 : 0);
+
   var orgSummary = {
     totalLicenses: totalLicenses,
     licenseMonthlyFee: LICENSE_COST_MONTHLY,
     flatSubscriptionSpend: totalLicenses * LICENSE_COST_MONTHLY,
     activeUsersCount: activeUsersCount,
     licenseUtilization: Math.round(licenseUtilization * 10) / 10,
-    totalCodeCost: totalCodeCost,
+    // costs
+    totalCodeCost: totalCodeCost,          // lifetime
+    totalCodeCost30d: totalCodeCost30d,    // current period (canonical KPI)
+    totalCodeCostPrior: totalCodeCostPrior, // prior 30 days (for delta)
+    costDeltaPct: costDeltaPct,
+    roiIndex30d: roiIndex30d,
     totalCodeTokens: totalCodeTokens,
-    overallCacheHitRate: totalCodeTokens > 0 ? (users.reduce(function(acc, u) { return acc + u.cacheReadTokens; }, 0) / totalCodeTokens) * 100 : 0,
-    avgCostPerUser: totalLicenses > 0 ? totalCodeCost / totalLicenses : 0,
+    overallCacheHitRate: overallCacheHitRate,
+    avgCostPerUser30d: totalLicenses > 0 ? totalCodeCost30d / totalLicenses : 0,
+    avgCostPerUser: totalLicenses > 0 ? totalCodeCost / totalLicenses : 0, // back-compat
     potentialSavings: wastedSavings,
+    anchorDate: anchorDate,
     reportPeriod: {
-      from: dailyTimeSeriesList.length > 0 ? dailyTimeSeriesList[0].date : 'N/A',
-      to: dailyTimeSeriesList.length > 0 ? dailyTimeSeriesList[dailyTimeSeriesList.length - 1].date : 'N/A'
+      from: last30Series.length > 0 ? last30Series[0].date : 'N/A',
+      to: last30Series.length > 0 ? last30Series[last30Series.length - 1].date : 'N/A',
+      windowDays: 30
     },
+    maxFileMtimeMs: maxFileMtimeMs,
     generatedTime: new Date().toISOString()
   };
 
   return {
+    methodologyVersion: 'v2.0',
     orgSummary: orgSummary,
     users: users,
     projects: projectsList,
     modelBreakdowns: modelBreakdownOrg,
-    dailyTimeSeries: dailyTimeSeriesList
+    dailyTimeSeries: dailyTimeSeriesList // 90 days
   };
 }
 
@@ -780,17 +899,106 @@ function getPrimaryModelFromMap(modelMap) {
   return primary;
 }
 
-function isRecentActivity(dateStr) {
+/**
+ * Whether the given activity date is within the last 30 days *of the anchor*.
+ * Anchor defaults to the org's most recent activity date so the gate stays
+ * coherent even when the script wakes a few days after the last upload.
+ * Day-diff is computed against IST midnight to avoid TZ off-by-one bugs.
+ */
+function isRecentActivity(dateStr, anchorDate) {
   if (!dateStr || dateStr === 'N/A') return false;
+  var anchor = anchorDate || todayISTDate();
+  var diff = daysBetween(dateStr, anchor);
+  return diff !== null && diff >= 0 && diff <= 30;
+}
+
+/**
+ * Today's date as YYYY-MM-DD in IST. Single source of TZ-aware "now".
+ */
+function todayISTDate() {
+  return Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd');
+}
+
+/**
+ * Normalize any date-ish string to YYYY-MM-DD. Accepts ISO timestamps,
+ * raw date strings, or anything Date() can parse. Returns '' on failure.
+ */
+function normalizeDate(s) {
+  if (!s) return '';
+  if (typeof s !== 'string') return '';
+  // Fast path: already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // ISO timestamp prefix
+  var m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1];
   try {
-    var actDate = new Date(dateStr);
-    var now = new Date();
-    var diffTime = Math.abs(now - actDate);
-    var diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays <= 30; // Active in the last 30 days
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    return Utilities.formatDate(d, 'Asia/Kolkata', 'yyyy-MM-dd');
   } catch (e) {
-    return false;
+    return '';
   }
+}
+
+/**
+ * Add N days (can be negative) to a YYYY-MM-DD string, returning YYYY-MM-DD.
+ * Uses noon-UTC anchoring to dodge DST drift.
+ */
+function addDays(dateStr, days) {
+  var parts = dateStr.split('-');
+  var d = new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), 12, 0, 0));
+  d.setUTCDate(d.getUTCDate() + days);
+  var y = d.getUTCFullYear();
+  var mo = ('0' + (d.getUTCMonth() + 1)).slice(-2);
+  var dy = ('0' + d.getUTCDate()).slice(-2);
+  return y + '-' + mo + '-' + dy;
+}
+
+/**
+ * Integer day-diff between two YYYY-MM-DD strings (b - a). Returns null on
+ * parse failure. Both dates anchored at UTC noon to avoid DST drift.
+ */
+function daysBetween(a, b) {
+  if (!a || !b) return null;
+  var pa = a.split('-'), pb = b.split('-');
+  if (pa.length !== 3 || pb.length !== 3) return null;
+  var da = Date.UTC(parseInt(pa[0], 10), parseInt(pa[1], 10) - 1, parseInt(pa[2], 10), 12, 0, 0);
+  var db = Date.UTC(parseInt(pb[0], 10), parseInt(pb[1], 10) - 1, parseInt(pb[2], 10), 12, 0, 0);
+  return Math.round((db - da) / 86400000);
+}
+
+/**
+ * Build a date window ending at endDate (inclusive) of `lengthDays` days.
+ * Returns { dates: [YYYY-MM-DD], has: { 'YYYY-MM-DD': true } } for O(1) lookups.
+ */
+function buildDateWindow(endDate, lengthDays) {
+  var out = { dates: [], has: {} };
+  for (var i = lengthDays - 1; i >= 0; i--) {
+    var d = addDays(endDate, -i);
+    out.dates.push(d);
+    out.has[d] = true;
+  }
+  return out;
+}
+
+/**
+ * Reclamation confidence (0–100) — replaces v1's hard-coded "99% / 80%" labels.
+ *   - Truly Inactive with no lifetime activity: 95–99 (high)
+ *   - Truly Inactive but had historical activity: scales down with recency
+ *   - Low Engagement (some recent activity): 30–60 (medium)
+ *   - Anyone protected by isNewHire / hasCodeActivity gate: 0 (safe)
+ */
+function computeReclamationConfidence(user, anchorDate) {
+  if (user.isNewHire) return 0;
+  if (user.costLast30d >= 5.00 || user.activeDays30d >= 3) return 0;
+  if (user.totalTokens === 0) return 99;
+  var daysSince = daysBetween(user.lastActivity, anchorDate);
+  if (daysSince === null) return 80;
+  if (daysSince >= 60) return 90;
+  if (daysSince >= 45) return 80;
+  if (daysSince >= 30) return 65;
+  if (user.costAllTime < 5) return 55;
+  return 40;
 }
 
 /**
@@ -833,18 +1041,123 @@ function sendDigestAlert() {
   var data = getDashboardData(false);
   if (data.error) return { success: false, message: data.message };
   var s = data.orgSummary;
-  var roi = s.totalCodeCost > 0 && s.flatSubscriptionSpend > 0 ? ((s.totalCodeCost / s.flatSubscriptionSpend) * 100).toFixed(0) : '—';
+  // ROI uses the last 30-day cost (matches monthly subscription spend timescale)
+  var roi = s.totalCodeCost30d > 0 && s.flatSubscriptionSpend > 0
+    ? ((s.totalCodeCost30d / s.flatSubscriptionSpend) * 100).toFixed(0)
+    : '—';
+  var deltaStr = (s.costDeltaPct >= 0 ? '+' : '') + (s.costDeltaPct || 0).toFixed(0) + '% vs prior 30d';
   var wasted = Math.round((s.potentialSavings || 0) / LICENSE_COST_MONTHLY);
   var text = '*📊 Claude AI Weekly Digest — ' + Utilities.formatDate(new Date(), 'Asia/Kolkata', 'MMM d, yyyy') + '*\n' +
-    '> 💰 Equivalent API Cost: *' + (s.totalCodeCost || 0).toFixed(2) + ' USD*\n' +
+    '> 💰 API-Equivalent Cost (last 30d): *' + (s.totalCodeCost30d || 0).toFixed(2) + ' USD* (' + deltaStr + ')\n' +
     '> 🪙 Subscription Spend: *' + (s.flatSubscriptionSpend || 0).toFixed(2) + ' USD/mo*\n' +
     '> 👥 Active Developers: *' + s.activeUsersCount + ' / ' + s.totalLicenses + '* (' + s.licenseUtilization + '% utilization)\n' +
-    '> 📈 ROI Index: *' + roi + '%*\n' +
-    (wasted > 0 ? '> ⚠️ *' + wasted + ' inactive license(s)* detected — $' + (s.potentialSavings || 0).toFixed(0) + '/mo wasted\n' : '> ✅ No wasted licenses detected\n');
+    '> 📈 ROI Index (30d): *' + roi + '%*\n' +
+    (wasted > 0
+      ? '> ⚠️ *' + wasted + ' inactive license(s)* — $' + (s.potentialSavings || 0).toFixed(0) + '/mo reclaimable\n'
+      : '> ✅ No wasted licenses detected\n');
   try {
     var resp = UrlFetchApp.fetch(url, { method: 'POST', contentType: 'application/json', payload: JSON.stringify({ text: text }), muteHttpExceptions: true });
     return { success: resp.getResponseCode() < 300, status: resp.getResponseCode() };
   } catch (e) {
     return { success: false, message: e.toString() };
   }
+}
+
+/**
+ * Send a per-user re-engagement nudge via the configured webhook.
+ * The dashboard surfaces a "Send nudge" button next to each reclamation
+ * candidate; clicking it fires this function with the user's name.
+ */
+function sendUserNudge(userName, customMessage) {
+  var url = getWebhookConfig().webhookUrl;
+  if (!url) return { success: false, message: 'No webhook URL configured' };
+  if (!userName) return { success: false, message: 'No user specified' };
+  var msg = customMessage && customMessage.length > 0
+    ? customMessage
+    : 'we noticed you haven\'t used Claude Code in a while — is there anything we can help unblock? Reply here or DM your manager.';
+  var text = '*👋 Hi ' + userName + '* — ' + msg + '\n' +
+    '_(automated nudge from the Claude Usage ROI Dashboard, ' + todayISTDate() + ')_';
+  try {
+    var resp = UrlFetchApp.fetch(url, { method: 'POST', contentType: 'application/json', payload: JSON.stringify({ text: text }), muteHttpExceptions: true });
+    var ok = resp.getResponseCode() < 300;
+    if (ok) {
+      // Record nudge timestamp so the dashboard can show "Last nudged: X ago"
+      var props = PropertiesService.getScriptProperties();
+      var key = 'nudge_log';
+      var log = {};
+      try { log = JSON.parse(props.getProperty(key) || '{}'); } catch (e) {}
+      log[userName] = new Date().toISOString();
+      props.setProperty(key, JSON.stringify(log));
+    }
+    return { success: ok, status: resp.getResponseCode() };
+  } catch (e) {
+    return { success: false, message: e.toString() };
+  }
+}
+
+/**
+ * Returns the nudge-history log (developer name -> last nudge ISO timestamp).
+ * Used by the License Optimization page to render "Last nudged: 3d ago" chips.
+ */
+function getNudgeLog() {
+  try {
+    return JSON.parse(PropertiesService.getScriptProperties().getProperty('nudge_log') || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
+ * Lightweight freshness check used by the client's "newer data available" poller.
+ * Returns the latest mtime across all uploader JSON files plus the dashboard
+ * payload's anchorDate so the client can decide whether to nudge a refresh.
+ * No caching here — must reflect Drive state on each call.
+ */
+function getFreshnessInfo() {
+  try {
+    var folder = DriveApp.getFolderById(SHARED_DRIVE_FOLDER_ID);
+    var files = folder.getFiles();
+    var maxMtime = 0;
+    var fileCount = 0;
+    while (files.hasNext()) {
+      var f = files.next();
+      if (f.isTrashed()) continue;
+      var n = f.getName();
+      if (n.endsWith('_claude_daily.json') || n.endsWith('_claude_session.json')) {
+        fileCount++;
+        var t = f.getLastUpdated().getTime();
+        if (t > maxMtime) maxMtime = t;
+      }
+    }
+    return { maxMtimeMs: maxMtime, fileCount: fileCount, checkedAtMs: Date.now() };
+  } catch (e) {
+    return { maxMtimeMs: 0, fileCount: 0, error: e.toString() };
+  }
+}
+
+/**
+ * Returns the current REAL_PROJECTS allowlist as a Script-Properties override
+ * (if present) merged with the in-code defaults. Lets admins promote a name
+ * without redeploying the script.
+ */
+function getProjectAllowlistExtras() {
+  try {
+    return JSON.parse(PropertiesService.getScriptProperties().getProperty('real_projects_extras') || '[]');
+  } catch (e) {
+    return [];
+  }
+}
+function addProjectAllowlistEntry(fragment) {
+  if (!fragment) return { success: false, message: 'fragment required' };
+  var extras = getProjectAllowlistExtras();
+  if (extras.indexOf(fragment) === -1) extras.push(fragment);
+  PropertiesService.getScriptProperties().setProperty('real_projects_extras', JSON.stringify(extras));
+  clearDashboardCache();
+  return { success: true, extras: extras };
+}
+function removeProjectAllowlistEntry(fragment) {
+  var extras = getProjectAllowlistExtras().filter(function(x) { return x !== fragment; });
+  PropertiesService.getScriptProperties().setProperty('real_projects_extras', JSON.stringify(extras));
+  clearDashboardCache();
+  return { success: true, extras: extras };
 }

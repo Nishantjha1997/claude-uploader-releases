@@ -4,8 +4,8 @@
   <base target="_top">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Compliance Operations Center · Claude Usage Uploader</title>
-  <meta name="description" content="Compliance Operations Center — monitor developer upload status, manage roster, and resolve exceptions.">
+  <title>Compliance Operations Center &#183; Claude Usage Uploader</title>
+  <meta name="description" content="Compliance Operations Center &#8212; monitor developer upload status, manage roster, and resolve exceptions.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -15,7 +15,7 @@
 </head>
 <body>
 
-<!-- 🌌 Animated Ambient Background Orbs + Particles -->
+<!-- &#55356;&#57100; Animated Ambient Background Orbs + Particles -->
 <div class="ambient-background">
   <div class="ambient-orb orb-1"></div>
   <div class="ambient-orb orb-2"></div>
@@ -30,7 +30,7 @@
   </div>
 </div>
 
-<!-- ⏳ Premium Loading Screen -->
+<!-- &#9203; Premium Loading Screen -->
 <div id="loading">
   <div class="loader-rings">
     <div class="ring ring-1"></div>
@@ -104,6 +104,7 @@
     <!-- TOP BAR -->
     <header class="top-bar">
       <div class="top-bar-left">
+        <button class="btn btn-ghost btn-sm mobile-menu-btn" onclick="toggleMobileSidebar()" title="Open menu" aria-label="Menu" style="display:none;">&#9776;</button>
         <h1 class="page-title" id="pageTitle">Overview</h1>
       </div>
       <div class="top-bar-right">
@@ -111,6 +112,8 @@
         <span class="hd-badge" id="countdownBadge">Auto-refresh in &hellip;</span>
         <button class="btn btn-ghost btn-sm" onclick="exportLogsToCSV()" id="exportLogsBtn" title="Download full compliance log as CSV">&#128190; Export Logs</button>
         <button class="btn-refresh" id="refreshBtn" onclick="fetchData()">&#8635; Refresh</button>
+        <!-- v2: methodology / help drawer trigger (parity with ROI dashboard v2) -->
+        <button class="btn btn-ghost btn-sm" onclick="openMethodologyDrawer()" title="Methodology & calculation reference" aria-label="Help">&#9432;</button>
         <span class="hd-time" id="lastUpdated"></span>
       </div>
     </header>
@@ -121,8 +124,20 @@
       <!-- ==================== OVERVIEW PAGE ==================== -->
       <div class="page-view active" id="page-overview">
 
+        <!-- v2: Headline insight card &#8212; auto-generated single-line summary -->
+        <div id="headlineInsight" class="card" style="display:none;padding:1rem 1.25rem;margin-bottom:1rem;border-left:3px solid var(--accent,#3b82f6);font-size:0.95rem;line-height:1.5;"></div>
+
         <!-- KPI Strip -->
         <div class="kpi-strip" id="overviewKpis"></div>
+
+        <!-- v2: 12-week compliance trend chart -->
+        <div class="card" style="padding:1rem 1.25rem;margin-bottom:1rem;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
+            <h3 style="margin:0;font-size:0.95rem;color:var(--text,#e2e8f0);">12-Week Compliance Trend</h3>
+            <span style="font-size:0.74rem;color:var(--muted,#94a3b8);">Stacked bars &#183; compliant / failed / missing</span>
+          </div>
+          <div id="complianceTrendChart" style="height:220px;"></div>
+        </div>
 
         <!-- Alert Rail -->
         <div class="alert-rail" id="alertRail"></div>
@@ -244,7 +259,7 @@
               <div class="card-icon ci-purple">&#128197;</div>
               <div>
                 <div class="card-title">8-Week History</div>
-                <div class="card-subtitle">Compliance streak — last 8 weeks per developer</div>
+                <div class="card-subtitle">Compliance streak &#8212; last 8 weeks per developer</div>
               </div>
             </div>
           </div>
@@ -263,7 +278,7 @@
               <div class="card-icon ci-green">&#127942;</div>
               <div>
                 <div class="card-title">Consistency Leaderboard</div>
-                <div class="card-subtitle">Active upload streaks — consecutive weeks of compliance</div>
+                <div class="card-subtitle">Active upload streaks &#8212; consecutive weeks of compliance</div>
               </div>
             </div>
           </div>
@@ -306,6 +321,8 @@
             </div>
             <button class="btn btn-primary btn-sm" onclick="fetchData()">&#8635; Refresh</button>
           </div>
+          <!-- v2: drift KPI strip + "Force update all outdated" action -->
+          <div id="versionDriftKpi"></div>
           <div class="vm-grid" id="versionMatrixGrid">
             <!-- Rendered via JS -->
           </div>
@@ -314,18 +331,25 @@
 
       <!-- ==================== DEVELOPERS PAGE ==================== -->
       <div class="page-view" id="page-developers">
+        <!-- Developer KPIs -->
+        <div class="kpi-strip" id="developersKpis" style="margin-bottom: 1.5rem;"></div>
+
         <div class="card">
           <div class="section-hd">
             <div>
               <div class="section-title">Developer Roster</div>
-              <div class="section-sub">Unified view of all developers across the system</div>
+              <div class="section-sub">Unified view of registered developers active on the utility</div>
             </div>
           </div>
           <div class="table-wrap">
             <table class="data-table" id="devRosterTable">
               <thead><tr>
-                <th>Name</th><th>Registration</th><th>Presence</th>
-                <th>This Week</th><th>Last Upload</th><th>Actions</th>
+                <th>Name</th>
+                <th>Version</th>
+                <th>Status</th>
+                <th>Last Seen</th>
+                <th>Last Upload</th>
+                <th>Actions</th>
               </tr></thead>
               <tbody id="devRosterTbody"></tbody>
             </table>
@@ -347,7 +371,7 @@
             </div>
           </div>
           <div class="admin-form" style="margin-bottom:16px">
-            <select id="adminNameSelect"><option value="">— select developer —</option></select>
+            <select id="adminNameSelect"><option value="">&#8212; select developer &#8212;</option></select>
             <button class="btn btn-primary" onclick="queueForceRun()" id="adminRunBtn">Queue Force Run</button>
             <button class="btn btn-ghost btn-sm" onclick="runAll()" id="runAllBtn">&#9654;&#9654; Run All</button>
             <button class="btn btn-ghost btn-sm" onclick="runOnline()" id="runOnlineBtn">&#128994; Run Online</button>
@@ -380,10 +404,16 @@
             </div>
             <button class="btn btn-red btn-sm" onclick="clearAllTriggers()">&#128465; Clear All</button>
           </div>
+          <!-- v2: bulk-action bar (appears when at least one row is selected) -->
+          <div id="queueBulkBar" style="display:none;align-items:center;gap:0.75rem;padding:0.65rem 0.9rem;margin-bottom:0.5rem;background:rgba(37,99,235,0.1);border:1px solid rgba(37,99,235,0.3);border-radius:8px;">
+            <span id="queueBulkCount" style="font-weight:700;color:var(--text,#e2e8f0);">0 selected</span>
+            <button class="btn btn-red btn-sm" onclick="cancelSelectedTriggers()">Cancel selected</button>
+            <button class="btn btn-ghost btn-sm" onclick="window._bulkQueueSelected={};toggleQueueBulkSelect();">Clear selection</button>
+          </div>
           <div id="triggerQueueEmpty" class="empty-state" style="display:none">No pending triggers.</div>
           <div class="table-wrap">
             <table class="data-table" id="triggerQueueTable" style="display:none">
-              <thead><tr><th>Developer</th><th>Queued At</th><th>Starts In</th><th>Type</th><th></th></tr></thead>
+              <thead><tr><th style="width:30px;"></th><th>Developer</th><th>Queued At</th><th>Starts In</th><th>Type</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -394,6 +424,9 @@
       <div class="page-view" id="page-roster">
         <!-- Registration KPIs -->
         <div class="kpi-strip" id="rosterKpis"></div>
+
+        <!-- v2: Onboarding strip &#8212; devs whose first ping was within the last 14 days -->
+        <div id="onboardingStrip" style="display:none;"></div>
 
         <!-- Registered Developers (compliance-tracked) -->
         <div class="card">
@@ -422,7 +455,7 @@
               <div class="card-icon ci-purple">&#128101;</div>
               <div>
                 <div class="card-title">Awaiting Onboarding</div>
-                <div class="card-subtitle">Developers expected to register — auto-removed when they first ping</div>
+                <div class="card-subtitle">Developers expected to register &#8212; auto-removed when they first ping</div>
               </div>
             </div>
             <button class="btn btn-ghost btn-sm" onclick="loadExpectedDevelopers()">&#8635; Reload</button>
@@ -509,6 +542,48 @@
             <span id="pruneResult" style="font-size:13px;color:var(--t3)"></span>
           </div>
         </div>
+
+        <!-- v2: Daily Auto-Generate toggle -->
+        <div class="card">
+          <div class="card-hd">
+            <div class="card-hd-left">
+              <div class="card-icon ci-green">&#9851;</div>
+              <div>
+                <div class="card-title">Daily Auto-Generate</div>
+                <div class="card-subtitle">When a developer is first seen online each day, a FORCE_RUN is queued 10 min later so reports get uploaded automatically every day.</div>
+              </div>
+            </div>
+          </div>
+          <div id="autoGenStatusBox" style="padding:0.85rem 1rem;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:10px;">Loading&#8230;</div>
+        </div>
+
+        <!-- v2: Admin Allowlist editor -->
+        <div class="card">
+          <div class="card-hd">
+            <div class="card-hd-left">
+              <div class="card-icon ci-indigo">&#128274;</div>
+              <div>
+                <div class="card-title">Admin Allowlist</div>
+                <div class="card-subtitle">When empty, anyone with web-app access can run admin actions (pilot mode). Once set, only listed emails can mutate state.</div>
+              </div>
+            </div>
+          </div>
+          <div id="adminAllowlistBox" style="padding:0.85rem 1rem;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:10px;">Loading&#8230;</div>
+        </div>
+
+        <!-- v2: Auto-Stall Scan controls -->
+        <div class="card">
+          <div class="card-hd">
+            <div class="card-hd-left">
+              <div class="card-icon ci-red">&#128276;</div>
+              <div>
+                <div class="card-title">Auto-Stall Alert</div>
+                <div class="card-subtitle">Hourly scheduled scan that emails the admin allowlist when developers haven't heartbeated in over 24 hours (deduped per stall cycle).</div>
+              </div>
+            </div>
+          </div>
+          <div id="stallScanBox" style="padding:0.85rem 1rem;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:10px;">Loading&#8230;</div>
+        </div>
       </div>
 
     </div><!-- /content-scroll -->
@@ -559,6 +634,44 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- v2: Methodology Drawer (header help icon) -->
+<div id="methodologyDrawer" class="modal" onclick="if(event.target===this)closeMethodologyDrawer()">
+  <div class="modal-box" style="max-width:680px;">
+    <div class="modal-hd">
+      <h2>Methodology &amp; Calculation Reference</h2>
+      <button class="modal-close" onclick="closeMethodologyDrawer()">&#10005;</button>
+    </div>
+    <div class="modal-body" style="padding:1rem 1.25rem;">
+      <div style="background:rgba(37,99,235,0.06);border-left:3px solid var(--accent,#3b82f6);padding:0.9rem 1rem;border-radius:8px;margin-bottom:1rem;">
+        <div style="font-size:0.74rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted,#94a3b8);margin-bottom:0.4rem;">Current values</div>
+        <div id="methodologyLiveValues" style="font-size:0.85rem;line-height:1.7;">Loading&#8230;</div>
+      </div>
+
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">Online status</h3>
+      <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">Online = last HEARTBEAT or last PONG within the last 10 minutes. v1 also included <code>lastSeen</code> (which updates on any status) &#8212; that wrongly marked devs as online right after a successful upload even if their service crashed.</p>
+
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">Compliance week</h3>
+      <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">Each week starts on Monday in the script timezone. A developer is compliant for the week when at least one SUCCESS row exists for that week. The 12-week trend chart sums compliant / failed / missing across all expected developers per week.</p>
+
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">Daily auto-generate</h3>
+      <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">When a developer is first seen online on a given calendar day, a FORCE_RUN trigger is queued 10 minutes later so reports get uploaded automatically. Skipped for paused devs, devs that already have a trigger queued, and devs that already uploaded successfully today. Toggle from the Health page.</p>
+
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">Reclamation / stall threshold</h3>
+      <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">A developer is "stalled" when their last heartbeat is older than 24 hours (configurable via the <code>stall_threshold_hours</code> Script Property). The hourly auto-stall scan emails the admin allowlist once per stall cycle &#8212; a new alert fires only after the dev pings again.</p>
+
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">Webhook authentication</h3>
+      <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">Every uploader ping is HMAC-SHA256 signed with the shared secret. v2 tightened the replay window from 2 hours &#8594; 5 minutes, rejects future-dated timestamps (>60s ahead), and caches signatures during the validity window so a captured payload can't be replayed. Secret can be rotated via the <code>hmac_secret</code> Script Property (requires coordinated binary redeploy).</p>
+
+      <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">v2 changelog</h3>
+      <ul style="font-size:0.82rem;color:var(--muted,#94a3b8);line-height:1.6;padding-left:1.2rem;">
+        <li><strong>v2.0</strong> &#8212; Period-aware compliance trend (12 weeks). Online-gate fix (excludes lastSeen). Logs pipeline visualizer handles non-terminal newest events. Tighter HMAC + replay cache. Soft admin allowlist via Script Properties. Per-week reminder email throttle. Daily auto-generate on first online + 10 min. Auto-stall scan. Bulk-cancel triggers. Version drift card with bulk force-update. CSV-injection guard.</li>
+        <li><strong>v1.x</strong> &#8212; Single-event terminal heuristic, lifetime online gate, 2-hour HMAC window, hardcoded admin/version constants, no auto-generate.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
 <?!= include('JavaScript'); ?>
 </body>
 </html>

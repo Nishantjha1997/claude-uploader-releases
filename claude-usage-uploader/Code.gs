@@ -3,26 +3,70 @@
 // Code.gs (Server-side logic)
 // ================================================================
 
-// -------------------- WEBHOOK AUTH --------------------
-var WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
-var HMAC_STALE_SECS = 7200;  // tolerate up to 2 hours of system clock drift
+// -------------------- WEBHOOK AUTH (v2) --------------------
+// Default secret. v2: also reads `hmac_secret` from ScriptProperties when set,
+// so the secret can be rotated without a code redeploy. Currently-deployed
+// uploader binaries still sign with the constant — keeping it allows a
+// rolling migration once binaries are redeployed.
+var WEBHOOK_HMAC_SECRET_DEFAULT = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
+var HMAC_STALE_SECS = 300;   // v2: tightened from 7200s (was a 2h replay window)
+var HMAC_FUTURE_TOL = 300;   // Allow up to 5 minutes clock skew tolerance for drifted client machines
+
+function getWebhookSecret_() {
+  try {
+    var override = PropertiesService.getScriptProperties().getProperty('hmac_secret');
+    return (override && override.length > 8) ? override : WEBHOOK_HMAC_SECRET_DEFAULT;
+  } catch (e) {
+    return WEBHOOK_HMAC_SECRET_DEFAULT;
+  }
+}
 
 function computeHmac256_(secret, message) {
   var raw = Utilities.computeHmacSha256Signature(message, secret);
   return raw.map(function(b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join('');
 }
 
+// v2: Constant-time string equality — avoids early-exit timing leaks even though
+// the GAS sandbox makes this largely cosmetic; it's still good hygiene.
+function safeEqual_(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  var r = 0;
+  for (var i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
+// v2: Anti-replay nonce cache — signatures used within the staleness window
+// are remembered for the full window length and can't be replayed.
+function nonceSeen_(sig) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var key = 'nsig_' + sig.substring(0, 32);
+    if (cache.get(key)) return true;
+    cache.put(key, '1', HMAC_STALE_SECS + 30);
+    return false;
+  } catch (e) {
+    return false; // fail-open on cache errors; tighter than crashing
+  }
+}
+
 // Returns '' on success, or a short reason string on failure.
+// v2: rejects future-dated timestamps, enforces a tight 5-min staleness
+// window, and caches signatures to block replay within that window.
 function verifyWebhookSignature_(e) {
   var ts  = (e.parameter && e.parameter._ts)  ? e.parameter._ts  : '';
   var sig = (e.parameter && e.parameter._sig) ? e.parameter._sig : '';
   if (!ts || !sig) return 'missing_params';
+  var tsInt = parseInt(ts, 10);
+  if (!isFinite(tsInt) || tsInt <= 0) return 'bad_ts';
   var now = Math.floor(Date.now() / 1000);
-  var age = Math.abs(now - parseInt(ts, 10));
-  if (age > HMAC_STALE_SECS) return 'stale_ts (' + age + 's, limit ' + HMAC_STALE_SECS + 's)';
+  var skew = now - tsInt; // positive = past, negative = future
+  if (skew > HMAC_STALE_SECS) return 'stale_ts (' + skew + 's, limit ' + HMAC_STALE_SECS + 's)';
+  if (skew < -HMAC_FUTURE_TOL) return 'future_ts (' + (-skew) + 's ahead of server)';
   var body = (e.postData && e.postData.contents) ? e.postData.contents : '';
-  var expected = computeHmac256_(WEBHOOK_HMAC_SECRET, ts + '.' + body);
-  if (sig !== expected) return 'sig_mismatch';
+  var expected = computeHmac256_(getWebhookSecret_(), ts + '.' + body);
+  if (!safeEqual_(sig, expected)) return 'sig_mismatch';
+  if (nonceSeen_(sig)) return 'replay_blocked';
   return '';
 }
 
@@ -47,20 +91,63 @@ var STATUS = {
 // Status types considered "noise" — routed to HeartbeatLog instead of ComplianceLog.
 var NOISE_STATUSES = [STATUS.HEARTBEAT, STATUS.WAITING, STATUS.PONG, STATUS.PAUSED, STATUS.WAITING_PAUSED];
 
-// -------------------- ADMIN ACCESS CONTROL --------------------
-// Add admin emails here. Empty array means "no allowlist" — anyone with web app access can mutate.
-// Set this BEFORE deploying publicly.
-var ADMIN_EMAILS = [
-  // 'admin@example.com',
-];
+// -------------------- ADMIN ACCESS CONTROL (v2) --------------------
+// v2: Admin allowlist is now backed by Script Properties (`admin_emails`,
+// comma-separated). When the property is empty/unset, behaviour falls back to
+// "no allowlist" (current pilot mode) so existing deployments keep working.
+// Once the property is set, the gate is enforced strictly. Admins can edit
+// the list from the Health page without redeploying.
+var ADMIN_EMAILS = []; // legacy in-source fallback (still honoured if non-empty)
+
+function getAdminAllowlist_() {
+  var list = ADMIN_EMAILS.slice();
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty('admin_emails') || '';
+    raw.split(/[,\s;]+/).forEach(function(em) {
+      em = em.trim().toLowerCase();
+      if (em && list.indexOf(em) === -1) list.push(em);
+    });
+  } catch (e) {}
+  return list;
+}
+
+function isAdmin_(email) {
+  if (!email) return false;
+  var list = getAdminAllowlist_();
+  if (list.length === 0) return true; // pilot mode — anyone authenticated
+  return list.indexOf(String(email).toLowerCase()) !== -1;
+}
 
 function requireAdmin_() {
-  if (ADMIN_EMAILS.length === 0) return;  // allowlist disabled
+  var list = getAdminAllowlist_();
+  if (list.length === 0) return; // pilot mode (no allowlist configured)
   var email;
   try { email = Session.getActiveUser().getEmail(); } catch (e) { email = ''; }
-  if (!email || ADMIN_EMAILS.indexOf(email) === -1) {
-    throw new Error('Unauthorized: ' + (email || 'anonymous'));
+  if (!email || list.indexOf(email.toLowerCase()) === -1) {
+    throw new Error('Unauthorized: ' + (email || 'anonymous') + '. Configure admin_emails in Script Properties.');
   }
+}
+
+// v2: surface allowlist state to the client (for the Health page editor)
+function getAdminAllowlistInfo() {
+  var email;
+  try { email = Session.getActiveUser().getEmail(); } catch (e) { email = ''; }
+  var list = getAdminAllowlist_();
+  return {
+    currentUserEmail: email,
+    allowlist: list,
+    pilotMode: list.length === 0,
+    isAdminCurrentUser: isAdmin_(email)
+  };
+}
+
+function setAdminAllowlist(emailsCsv) {
+  // First admin to set the list also becomes one of its members (bootstrap).
+  var existing = getAdminAllowlist_();
+  if (existing.length > 0) requireAdmin_();
+  var clean = String(emailsCsv || '').split(/[,\s;]+/).map(function(e) { return e.trim().toLowerCase(); }).filter(Boolean);
+  PropertiesService.getScriptProperties().setProperty('admin_emails', clean.join(','));
+  return { success: true, allowlist: clean };
 }
 
 function doGet(e) {
@@ -151,23 +238,39 @@ function ensurePausedDevelopersSheet_() {
   return sheet;
 }
 
+// v2: all week-math is anchored in the script timezone (typically Asia/Kolkata
+// for Sigma Solve) AND traversed via the same Utilities.formatDate call so the
+// header sequence can never drift on UTC offset boundaries. Previous version
+// mixed script-tz (Monday calc) with UTC (decrement) — produced off-by-one
+// dates for the older entries in the 8-week grid.
 function getCurrentWeekStart_() {
-  var now = new Date();
-  var day = now.getDay();
-  var diff = (day === 0) ? -6 : 1 - day;
-  var monday = new Date(now);
-  monday.setDate(now.getDate() + diff);
-  return Utilities.formatDate(monday, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var tz = Session.getScriptTimeZone();
+  var nowStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss');
+  // Reconstruct a Date that *represents* the same wall-clock time in tz
+  var parts = nowStr.split(/[- :]/);
+  var year = parseInt(parts[0], 10);
+  var month = parseInt(parts[1], 10) - 1;
+  var dayOfMonth = parseInt(parts[2], 10);
+  // Day-of-week in script tz: format with EEE
+  var dayName = Utilities.formatDate(new Date(), tz, 'EEE');
+  var dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  var dow = dayMap[dayName];
+  var diff = (dow === 0) ? -6 : 1 - dow;
+  // Build a fresh "Monday of this week, noon UTC" anchor that doesn't drift across DST
+  var anchor = new Date(Date.UTC(year, month, dayOfMonth + diff, 12, 0, 0));
+  return Utilities.formatDate(anchor, tz, 'yyyy-MM-dd');
 }
 
 function getWeekHeaders_(n) {
   var headers = [];
   var curr = getCurrentWeekStart_();
+  var parts = curr.split('-');
+  // Anchor at UTC noon to dodge DST boundary drift, then walk back 7 days at a
+  // time using setUTCDate (safe arithmetic).
+  var d = new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), 12, 0, 0));
   for (var i = 0; i < n; i++) {
-    headers.push(curr);
-    var d = new Date(curr + 'T00:00:00Z');
+    headers.push(Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd'));
     d.setUTCDate(d.getUTCDate() - 7);
-    curr = Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
   }
   return headers;
 }
@@ -428,6 +531,7 @@ function adminClearAllTriggers() {
 
 // Returns the last `limit` log entries for a specific developer, newest first.
 function getDeveloperLogs(name, limit) {
+  requireAdmin_(); // v2: gate behind admin allowlist (soft — no-op in pilot mode)
   limit = limit || 25;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var logs = [];
@@ -469,6 +573,7 @@ function getDeveloperLogs(name, limit) {
 // Derives per-developer activity from ComplianceLog.
 // Returns array of { name, lastSeen, lastHeartbeat, lastUpload, lastPong, pendingTrigger }
 function getActiveUsers() {
+  requireAdmin_(); // v2: gate behind admin allowlist (soft — no-op in pilot mode)
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var userMap = {};
   
@@ -567,13 +672,29 @@ function getActiveUsers() {
 
 // -------------------- DASHBOARD DATA --------------------
 
+// v2: full flush — used by admin mutations only (queueing triggers, paused
+// state changes, settings edits, roster edits). Heavy and expensive.
 function invalidateCache_() {
   var c = CacheService.getScriptCache();
   chunkedCacheRemove(c, 'dashboardData');
   c.remove('pausedSet');
   c.remove('triggerQueueRows');
   c.remove('setting_uploadFrequency');
+  c.remove('latest_uploader_version_gist');
   c.put('lastModified', String(Date.now()), 3600);
+}
+
+// v2: light flush — used by the webhook path on every ComplianceLog /
+// HeartbeatLog append. Only invalidates the dashboard payload itself; the
+// trigger-queue cache is left alone because heartbeat writes never mutate it,
+// and at fleet scale (50 devs × 12 pings/hr = 600 writes/hr) the previous
+// behaviour effectively disabled trigger-queue caching.
+function bumpLastModified_() {
+  try {
+    var c = CacheService.getScriptCache();
+    chunkedCacheRemove(c, 'dashboardData');
+    c.put('lastModified', String(Date.now()), 3600);
+  } catch (e) { /* fail-open */ }
 }
 
 // -------------------- CACHED FAST-READ HELPERS --------------------
@@ -720,6 +841,7 @@ function chunkedCacheRemove(cache, key) {
 }
 
 function getDashboardData() {
+  requireAdmin_(); // v2: gate behind admin allowlist (soft — no-op in pilot mode)
   var cache = CacheService.getScriptCache();
   var cached = chunkedCacheGet(cache, 'dashboardData');
   if (cached) {
@@ -788,7 +910,10 @@ function getDashboardData_uncached_() {
   var STATUS_RANK = { 'SUCCESS': 2, 'FAILURE': 1 };
 
   if (logSheet) {
-    var logData = getRecentLogRows_(logSheet, 3000);
+    // v2: bumped from 3000 → 8000 rows so 90-day compliance windows resolve
+    // correctly at 50-dev fleet scale. The Trend chart needs at least 12 weeks
+    // of SUCCESS/FAILURE history, which 3000 rows didn't cover.
+    var logData = getRecentLogRows_(logSheet, 8000);
     for (var i = 0; i < logData.length; i++) {
       var row = logData[i];
       if (!row[0]) continue;
@@ -911,7 +1036,42 @@ function getDashboardData_uncached_() {
   // 8. Paused developers
   var pausedDevelopers = getPausedDevelopersList();
 
+  // v2: build a 12-week compliance trend summary for the new chart. Walks
+  // the in-memory logData (already loaded above) one extra time scoped to
+  // the trailing 12 ISO weeks. For weeks that overlap the existing 8-week
+  // grid we reuse its tallies; older weeks are derived from raw events.
+  var trendWeeks = getWeekHeaders_(12).slice().reverse(); // oldest → newest
+  var trendSet = {};
+  trendWeeks.forEach(function(w) { trendSet[w] = { successByName: {}, failureByName: {} }; });
+  if (logSheet) {
+    // Reuse the logData we already have in scope from the compliance build
+    for (var ti = 0; ti < logData.length; ti++) {
+      var trow = logData[ti];
+      if (!trow[0]) continue;
+      var twk = String(trow[2] || '').trim();
+      if (!trendSet[twk]) continue;
+      var tstatus = String(trow[3] || '').trim().toUpperCase();
+      var tname = String(trow[1] || '').trim();
+      if (!tname) continue;
+      if (tstatus === 'SUCCESS') trendSet[twk].successByName[tname] = true;
+      else if (tstatus === 'FAILURE' || tstatus === 'ERROR') trendSet[twk].failureByName[tname] = true;
+    }
+  }
+  var expectedRosterSize = (expectedDevelopers || []).length + (registeredDevelopers || []).length;
+  var complianceTrend = trendWeeks.map(function(w) {
+    var bucket = trendSet[w];
+    var compliant = Object.keys(bucket.successByName).length;
+    // Don't double-count: a dev who later succeeded that week shouldn't be in failed
+    var failedNames = Object.keys(bucket.failureByName).filter(function(n) { return !bucket.successByName[n]; });
+    var failed = failedNames.length;
+    var missing = Math.max(0, expectedRosterSize - compliant - failed);
+    return { week: w, compliant: compliant, failed: failed, missing: missing };
+  });
+
   return {
+    methodologyVersion: 'v2.0',
+    schemaVersion: SHEET_SCHEMA_VERSION,
+    latestVersion: getLatestVersion(),
     expectedDevelopers: expectedDevelopers,
     registeredDevelopers: registeredDevelopers,
     weeks: weeks,
@@ -923,8 +1083,56 @@ function getDashboardData_uncached_() {
     uploadFrequency: getSetting_('uploadFrequency', 'weekly'),
     complianceGrid: complianceGrid,
     recentUploads: recentUploads,
-    weekHeaders: weekHeaders
+    weekHeaders: weekHeaders,
+    complianceTrend: complianceTrend,
+    generatedAt: new Date().toISOString()
   };
+}
+
+// v2: latest binary version source — replaces the hardcoded LATEST_VERSION
+// constant on the client. Reads from Script Properties (admin-editable) and
+// falls back to a sensible default for first-deploy compatibility.
+function getLatestVersion() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get('latest_uploader_version_gist');
+  if (cached && cached.length > 0) {
+    return cached.trim();
+  }
+
+  // Fallback to script property or code default
+  var fallback = '2.0.2';
+  try {
+    var v = PropertiesService.getScriptProperties().getProperty('latest_uploader_version');
+    if (v && v.length > 0) fallback = v.trim();
+  } catch (e) {}
+
+  // Gist URL containing the version manifest
+  var gistUrl = 'https://gist.githubusercontent.com/Nishantjha1997/ad763c62484a3ea70e7507bf671df0bb/raw/version.json';
+  try {
+    var response = UrlFetchApp.fetch(gistUrl, { muteHttpExceptions: true });
+    if (response.getResponseCode() === 200) {
+      var json = JSON.parse(response.getContentText());
+      if (json && json.latestVersion) {
+        var ver = String(json.latestVersion).trim();
+        cache.put('latest_uploader_version_gist', ver, 3600); // Cache for 1 hour
+        return ver;
+      }
+    }
+  } catch (e) {
+    log_('getLatestVersion: Failed to fetch from gist: ' + e.toString());
+  }
+
+  return fallback;
+}
+
+function setLatestVersion(version) {
+  requireAdmin_();
+  if (!version) return { success: false, error: 'version required' };
+  PropertiesService.getScriptProperties().setProperty('latest_uploader_version', String(version).trim());
+  try {
+    CacheService.getScriptCache().remove('latest_uploader_version_gist');
+  } catch (e) {}
+  return { success: true, latestVersion: getLatestVersion() };
 }
 
 // -------------------- CSV LOG EXPORT --------------------
@@ -946,6 +1154,11 @@ function getComplianceLogCSV() {
     var s = String(val === null || val === undefined ? '' : val);
     // Dates
     if (val && typeof val.toISOString === 'function') s = val.toISOString();
+    // v2: CSV-injection guard — prefix cells beginning with =, +, -, @, or
+    // tab/cr so Excel/Sheets treats them as literal text, not formulas.
+    if (s.length > 0 && /^[=+\-@\t\r]/.test(s)) {
+      s = "'" + s;
+    }
     // Escape quotes and wrap in quotes if necessary
     if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
       s = '"' + s.replace(/"/g, '""') + '"';
@@ -1124,6 +1337,129 @@ function checkAndTriggerSmartRetry_(name) {
   }
 }
 
+// -------------------- DAILY AUTO-GENERATE (v2) --------------------
+// For every developer that pings online, the FIRST time they're seen each
+// day, wait 10 minutes (so they're stable / not mid-boot) and then queue a
+// FORCE_RUN so reports get generated + uploaded that day automatically.
+// Skips users that are paused, already have a pending trigger, or have
+// already successfully uploaded today.
+//
+// State lives entirely in CacheService (auto-expires at 24h), so there's no
+// permanent state to clean up and no risk of bloating Script Properties.
+
+var AUTOGEN_DELAY_MS = 10 * 60 * 1000;  // 10 minutes after first heartbeat of the day
+var AUTOGEN_DEDUP_TTL_S = 23 * 3600;    // cache TTL just under 24h so a new day re-fires
+
+function getAutoGenerateEnabled_() {
+  try {
+    // Default = ON. Admin can disable via Script Properties: autogen_daily_enabled=0
+    var v = PropertiesService.getScriptProperties().getProperty('autogen_daily_enabled');
+    return v !== '0' && v !== 'false';
+  } catch (e) { return true; }
+}
+
+function setAutoGenerateEnabled(enabled) {
+  requireAdmin_();
+  PropertiesService.getScriptProperties().setProperty('autogen_daily_enabled', enabled ? '1' : '0');
+  return { success: true, enabled: !!enabled };
+}
+
+function getAutoGenerateStatus() {
+  return {
+    enabled: getAutoGenerateEnabled_(),
+    delayMinutes: Math.round(AUTOGEN_DELAY_MS / 60000),
+    description: 'When a developer is first seen online each day, a FORCE_RUN is queued 10 min later so their report uploads automatically.'
+  };
+}
+
+function maybeQueueDailyAutoGenerate_(name) {
+  if (!getAutoGenerateEnabled_()) return;
+  if (!name || name === 'UNKNOWN') return;
+
+  var cache = CacheService.getScriptCache();
+  var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var lower = name.trim().toLowerCase();
+  var firstSeenKey = 'autogen_firstseen_' + today + '_' + lower;
+  var queuedKey    = 'autogen_queued_'    + today + '_' + lower;
+
+  // Already queued today? — nothing to do
+  if (cache.get(queuedKey)) return;
+
+  var now = Date.now();
+  var firstSeenStr = cache.get(firstSeenKey);
+  if (!firstSeenStr) {
+    // First heartbeat we've observed today for this user — record and wait
+    cache.put(firstSeenKey, String(now), AUTOGEN_DEDUP_TTL_S);
+    return;
+  }
+  var firstSeen = parseInt(firstSeenStr, 10);
+  if (!isFinite(firstSeen) || now - firstSeen < AUTOGEN_DELAY_MS) return; // still within the 10-min stabilisation window
+
+  // Cheap pre-checks before grabbing the script lock
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (isDeveloperPaused_(ss, name)) {
+    cache.put(queuedKey, '1', AUTOGEN_DEDUP_TTL_S); // mark so we don't re-check each heartbeat
+    return;
+  }
+
+  // Skip if a trigger of any type is already pending for this user
+  var queueRows = getTriggerQueueRowsCached_();
+  for (var q = 0; q < queueRows.length; q++) {
+    if (queueRows[q].name.toLowerCase() === lower) {
+      cache.put(queuedKey, '1', AUTOGEN_DEDUP_TTL_S);
+      return;
+    }
+  }
+
+  // Skip if developer already uploaded successfully today (avoids duplicate runs)
+  var logSheet = ss.getSheetByName('ComplianceLog');
+  if (logSheet) {
+    var logData = getRecentLogRows_(logSheet, 200);
+    var todayPrefix = today; // YYYY-MM-DD
+    for (var i = 0; i < logData.length; i++) {
+      var row = logData[i];
+      if (!row[0]) continue;
+      var rName = String(row[1] || '').trim().toLowerCase();
+      if (rName !== lower) continue;
+      var status = String(row[3] || '').trim().toUpperCase();
+      if (status !== 'SUCCESS') continue;
+      var ts = row[0];
+      var tsStr = (ts && typeof ts.toISOString === 'function')
+        ? Utilities.formatDate(ts, Session.getScriptTimeZone(), 'yyyy-MM-dd')
+        : String(ts).substring(0, 10);
+      if (tsStr === todayPrefix) {
+        // Already uploaded today — mark queued so we don't re-check until tomorrow
+        cache.put(queuedKey, '1', AUTOGEN_DEDUP_TTL_S);
+        return;
+      }
+    }
+  }
+
+  // Queue the trigger under lock (race-safe — same pattern as SmartRetry)
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    // Re-check queue inside the lock
+    var qSheet = ensureTriggerQueue();
+    var freshData = qSheet.getDataRange().getValues();
+    for (var j = 1; j < freshData.length; j++) {
+      if (String(freshData[j][0]).trim().toLowerCase() === lower) {
+        cache.put(queuedKey, '1', AUTOGEN_DEDUP_TTL_S);
+        return;
+      }
+    }
+    var who = 'system:autoDaily';
+    var notBefore = new Date().toISOString();
+    qSheet.appendRow([name.trim(), new Date().toISOString(), who, 'FORCE_RUN', notBefore]);
+    SpreadsheetApp.flush();
+    cache.put(queuedKey, '1', AUTOGEN_DEDUP_TTL_S);
+    log_('AutoDaily: queued FORCE_RUN for ' + name + ' (first online today ' + Math.round((now - firstSeen) / 60000) + ' min ago)');
+    invalidateCache_();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // -------------------- WEBHOOK (POST) --------------------
 
 function doPost(e) {
@@ -1132,7 +1468,15 @@ function doPost(e) {
     // Parse name for the log if we can (best-effort — body may be malformed)
     var rejName = 'unknown';
     try { rejName = JSON.parse(e.postData.contents).name || rejName; } catch (_) {}
-    log_('doPost: signature rejected for "' + rejName + '" — ' + sigErr);
+    
+    // Throttle signature rejection logging per developer to once every 10 minutes
+    var cache = CacheService.getScriptCache();
+    var cacheKey = 'log_sig_rej_' + rejName.replace(/\s+/g, '_') + '_' + sigErr.substring(0, 10).replace(/[^a-zA-Z0-9]/g, '');
+    if (!cache.get(cacheKey)) {
+      log_('doPost: signature rejected for "' + rejName + '" — ' + sigErr);
+      cache.put(cacheKey, '1', 600); // 10 minutes cooldown
+    }
+    
     return ContentService
       .createTextOutput(JSON.stringify({ result: 'error', error: 'invalid_signature', reason: sigErr }))
       .setMimeType(ContentService.MimeType.JSON);
@@ -1180,6 +1524,7 @@ function doPost(e) {
               }
             }
           }
+          // Roster mutation — needs full invalidation
           invalidateCache_();
         }
       }
@@ -1209,8 +1554,13 @@ function doPost(e) {
     var weekStart = getCurrentWeekStart_();
 
     sheet.appendRow([new Date(), name, weekStart, status, message, nextPollAt, version, lastUpdateCheck]);
+    // v2: only flush the heavy caches for non-noise events; noise events bump
+    // lastModified only so the dashboard's freshness pill still updates, while
+    // triggerQueueRows / pausedSet caches survive heartbeat storms.
     if (!isNoise) {
-      invalidateCache_();
+      bumpLastModified_();
+    } else {
+      try { CacheService.getScriptCache().put('lastModified', String(Date.now()), 3600); } catch (_) {}
     }
 
     // Smart Retry: whenever a developer is seen online (heartbeat/ping), check if they
@@ -1219,8 +1569,19 @@ function doPost(e) {
     // We only fire this on HEARTBEAT/WAITING (the most frequent noise events) so it
     // runs in the background without adding latency to important lifecycle events.
     if ((status === 'HEARTBEAT' || status === 'WAITING') && name && name !== 'UNKNOWN') {
-      try { checkAndTriggerSmartRetry_(name); } catch (retryErr) {
-        log_('SmartRetry error for ' + name + ': ' + retryErr.message);
+      var cache = CacheService.getScriptCache();
+      var checkCacheKey = 'heavy_checks_cooldown_' + name.trim().toLowerCase();
+      if (!cache.get(checkCacheKey)) {
+        cache.put(checkCacheKey, '1', 180); // 3-minute cooldown
+        try { checkAndTriggerSmartRetry_(name); } catch (retryErr) {
+          log_('SmartRetry error for ' + name + ': ' + retryErr.message);
+        }
+        // v2: daily auto-generate — first heartbeat each day records firstSeen,
+        // subsequent heartbeats after the 10-min stabilisation window queue a
+        // FORCE_RUN (deduped per dev per day, paused/already-queued/already-uploaded skipped)
+        try { maybeQueueDailyAutoGenerate_(name); } catch (autoErr) {
+          log_('AutoDaily error for ' + name + ': ' + autoErr.message);
+        }
       }
     }
 
@@ -1603,48 +1964,67 @@ function pruneHeartbeatLog() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) return;
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    
     // 1. HeartbeatLog: max 2000 rows
-    var hbSheet = ss.getSheetByName('HeartbeatLog');
-    if (hbSheet) {
-      var maxHB = 2000;
-      var lastHB = hbSheet.getLastRow();
-      if (lastHB > maxHB + 500) {
-        var numToDelete = lastHB - maxHB;
-        hbSheet.deleteRows(2, numToDelete);
-        log_('Pruned ' + numToDelete + ' rows from HeartbeatLog');
-      }
-    }
+    fastPruneLogSheet_(
+      'HeartbeatLog',
+      2000,
+      ['Timestamp', 'Developer Name', 'Week Start Date', 'Status', 'Error Message', 'NextPollAt', 'Version', 'LastUpdateCheck']
+    );
     
     // 2. AppLog: max 1000 rows
-    var appSheet = ss.getSheetByName('AppLog');
-    if (appSheet) {
-      var maxApp = 1000;
-      var lastApp = appSheet.getLastRow();
-      if (lastApp > maxApp + 200) {
-        var numToDelete = lastApp - maxApp;
-        appSheet.deleteRows(2, numToDelete);
-        log_('Pruned ' + numToDelete + ' rows from AppLog');
-      }
-    }
+    fastPruneLogSheet_(
+      'AppLog',
+      1000,
+      ['Timestamp', 'Message']
+    );
     
-    // 3. ComplianceLog: max 5000 rows (covers ~1 year of compliance history)
-    var compSheet = ss.getSheetByName('ComplianceLog');
-    if (compSheet) {
-      var maxComp = 5000;
-      var lastComp = compSheet.getLastRow();
-      if (lastComp > maxComp + 1000) {
-        var numToDelete = lastComp - maxComp;
-        compSheet.deleteRows(2, numToDelete);
-        log_('Pruned ' + numToDelete + ' rows from ComplianceLog');
-      }
-    }
+    // 3. ComplianceLog: max 5000 rows
+    fastPruneLogSheet_(
+      'ComplianceLog',
+      5000,
+      ['Timestamp', 'Developer Name', 'Week Start Date', 'Status', 'Error Message', 'NextPollAt', 'Version', 'LastUpdateCheck']
+    );
   } catch(e) {
     log_('Prune error: ' + e.toString());
   } finally {
     lock.releaseLock();
   }
+}
+
+function fastPruneLogSheet_(sheetName, maxRows, headers) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return;
+  
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= maxRows + 100) return; // not enough rows to prune yet
+  
+  var keepRows = getRecentLogRows_(sheet, maxRows);
+  
+  // Clear the entire sheet (values and formatting)
+  sheet.clear();
+  
+  // Write headers
+  sheet.appendRow(headers);
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  
+  // Write kept rows
+  if (keepRows.length > 0) {
+    var numCols = Math.min(headers.length, keepRows[0].length);
+    var cleanKeepRows = keepRows.map(function(row) {
+      return row.slice(0, numCols);
+    });
+    sheet.getRange(2, 1, cleanKeepRows.length, numCols).setValues(cleanKeepRows);
+  }
+  
+  // Shrink the sheet to fit the data plus a small buffer of 50 empty rows
+  var currentMaxRows = sheet.getMaxRows();
+  var desiredRows = sheet.getLastRow() + 50;
+  if (currentMaxRows > desiredRows) {
+    sheet.deleteRows(desiredRows + 1, currentMaxRows - desiredRows);
+  }
+  
+  log_('Fast-pruned ' + (lastRow - keepRows.length - 1) + ' rows from ' + sheetName);
 }
 
 function adminForcePrune() {
@@ -1699,9 +2079,187 @@ function installPruneTrigger() {
   ScriptApp.newTrigger('pruneHeartbeatLog').timeBased().everyDays(1).create();
 }
 
+// -------------------- AUTO-STALL ALERT (v2) --------------------
+// Scheduled trigger that scans registered developers for stalled services
+// (no heartbeat for ≥ stallHoursThreshold) and emails the admin once per
+// stall cycle. Cycle = the contiguous staleness window; alerts are deduped
+// per developer until they ping again, then a new cycle can fire.
+
+function getStallThresholdHours_() {
+  try {
+    var v = parseInt(PropertiesService.getScriptProperties().getProperty('stall_threshold_hours') || '24', 10);
+    if (isFinite(v) && v >= 1 && v <= 168) return v;
+  } catch (e) {}
+  return 24;
+}
+
+function setStallThresholdHours(hours) {
+  requireAdmin_();
+  var h = parseInt(hours, 10);
+  if (!isFinite(h) || h < 1 || h > 168) return { success: false, error: 'hours must be between 1 and 168' };
+  PropertiesService.getScriptProperties().setProperty('stall_threshold_hours', String(h));
+  return { success: true, stallThresholdHours: h };
+}
+
+function runStallScan() {
+  // Designed to be called both manually and from a time-driven trigger.
+  // Public (no requireAdmin_) so the scheduler can run it.
+  var threshold = getStallThresholdHours_();
+  var thresholdMs = threshold * 3600 * 1000;
+  var now = Date.now();
+  var users = [];
+  try { users = getActiveUsers_internal_(); } catch (e) {
+    // Internal call must skip the admin gate.
+    users = [];
+  }
+  var stalled = [];
+  users.forEach(function(u) {
+    if (!u.lastHeartbeat && !u.lastPong) return; // never pinged — handled by onboarding strip, not stall alert
+    var keepAliveMs = 0;
+    if (u.lastHeartbeat) keepAliveMs = Math.max(keepAliveMs, new Date(u.lastHeartbeat).getTime());
+    if (u.lastPong)      keepAliveMs = Math.max(keepAliveMs, new Date(u.lastPong).getTime());
+    if (!keepAliveMs) return;
+    var age = now - keepAliveMs;
+    if (age >= thresholdMs) stalled.push({ name: u.name, ageHours: Math.round(age / 3600000), lastSeen: new Date(keepAliveMs).toISOString() });
+  });
+
+  // Per-developer dedup — only alert once per stall cycle
+  var props = PropertiesService.getScriptProperties();
+  var alerted = {};
+  try { alerted = JSON.parse(props.getProperty('stall_alerted') || '{}'); } catch (e) {}
+
+  // Clear dedup entries for devs that are no longer stalled (so next stall fires)
+  var stillStalledNames = {};
+  stalled.forEach(function(s) { stillStalledNames[s.name] = true; });
+  var newAlerted = {};
+  Object.keys(alerted).forEach(function(n) { if (stillStalledNames[n]) newAlerted[n] = alerted[n]; });
+  alerted = newAlerted;
+
+  var newlyStalled = stalled.filter(function(s) { return !alerted[s.name]; });
+
+  // Compose + send (one email, all newly-stalled devs)
+  if (newlyStalled.length > 0) {
+    var allowlist = getAdminAllowlist_();
+    if (allowlist.length === 0) {
+      log_('AutoStall: ' + newlyStalled.length + ' newly-stalled dev(s), but admin_emails is empty — skipping email');
+    } else {
+      var subject = '[Claude Usage] ' + newlyStalled.length + ' developer(s) stalled (>' + threshold + 'h)';
+      var lines = ['The following developers have not heartbeated in the last ' + threshold + ' hour(s):', ''];
+      newlyStalled.forEach(function(s) { lines.push('  • ' + s.name + ' — last seen ' + s.ageHours + 'h ago (' + s.lastSeen + ')'); });
+      lines.push('');
+      lines.push('Open the Compliance Dashboard → Queue tab to force-run, or check the developer\'s machine.');
+      try {
+        GmailApp.sendEmail(allowlist.join(','), subject, lines.join('\n'));
+        newlyStalled.forEach(function(s) { alerted[s.name] = new Date().toISOString(); });
+        log_('AutoStall: alerted on ' + newlyStalled.length + ' dev(s)');
+      } catch (e) {
+        log_('AutoStall: email send failed: ' + e.toString());
+      }
+    }
+  }
+  props.setProperty('stall_alerted', JSON.stringify(alerted));
+  return {
+    success: true,
+    stalledCount: stalled.length,
+    newlyAlerted: newlyStalled.length,
+    stalled: stalled,
+    thresholdHours: threshold
+  };
+}
+
+// Internal getActiveUsers — same logic without the admin gate, so the
+// scheduled stall scan can run without an active user session.
+function getActiveUsers_internal_() {
+  var oldRequireAdmin = requireAdmin_;
+  // Temporarily replace with a no-op (safe — we restore in finally)
+  requireAdmin_ = function() {};
+  try {
+    return getActiveUsers();
+  } finally {
+    requireAdmin_ = oldRequireAdmin;
+  }
+}
+
+function installStallTrigger() {
+  requireAdmin_();
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'runStallScan') return { success: true, message: 'Already installed' };
+  }
+  ScriptApp.newTrigger('runStallScan').timeBased().everyHours(1).create();
+  return { success: true, message: 'Stall scan trigger installed (hourly)' };
+}
+
+function uninstallStallTrigger() {
+  requireAdmin_();
+  var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'runStallScan') {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+  return { success: true, removed: removed };
+}
+
+function isStallTriggerInstalled() {
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'runStallScan') return true;
+  }
+  return false;
+}
+
+// v2: signature-rejection log (recent N entries) — surfaced on Health page.
+// Reads AppLog rows starting with the prefix we use in doPost.
+function getRecentSignatureRejections(limit) {
+  requireAdmin_();
+  limit = Math.min(limit || 50, 200);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('AppLog');
+  if (!sheet) return [];
+  var rows = getRecentLogRows_(sheet, 1000);
+  var out = [];
+  for (var i = rows.length - 1; i >= 0 && out.length < limit; i--) {
+    var msg = String(rows[i][1] || '');
+    if (msg.indexOf('doPost: signature rejected') === 0) {
+      var ts = rows[i][0];
+      if (ts && typeof ts.getTime === 'function') ts = ts.toISOString();
+      else ts = String(ts);
+      out.push({ timestamp: ts, message: msg });
+    }
+  }
+  return out;
+}
+
+// v2: bulk cancel pending triggers by name. Used by the new bulk-select UI.
+function adminCancelTriggerBatch(names) {
+  requireAdmin_();
+  if (!Array.isArray(names) || names.length === 0) return { success: false, error: 'No names provided' };
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('TriggerQueue');
+  if (!sheet) return { success: true, cancelled: 0 };
+  var lr = sheet.getLastRow();
+  if (lr <= 1) return { success: true, cancelled: 0 };
+  var nameSet = {};
+  names.forEach(function(n) { nameSet[String(n).trim().toLowerCase()] = true; });
+  var data = sheet.getDataRange().getValues();
+  var removed = 0;
+  for (var i = data.length - 1; i >= 1; i--) {
+    var n = String(data[i][0] || '').trim().toLowerCase();
+    if (nameSet[n]) {
+      sheet.deleteRow(i + 1);
+      removed++;
+    }
+  }
+  invalidateCache_();
+  return { success: true, cancelled: removed };
+}
+
 // -------------------- COMPLIANCE REMINDERS --------------------
 
-function sendComplianceReminders() {
+function sendComplianceReminders(force) {
   requireAdmin_();
   var adminEmail = Session.getActiveUser().getEmail();
   if (!adminEmail) return { success: false, error: 'Could not determine admin email. Ensure the web app runs as "User accessing the web app".' };
@@ -1717,6 +2275,23 @@ function sendComplianceReminders() {
 
   if (nonCompliant.length === 0) {
     return { success: true, message: 'All developers compliant for ' + currentWeek + '. No reminders needed.' };
+  }
+
+  // v2: throttle — at most one reminder per admin per week per current-week,
+  // unless explicitly forced. Prevents accidental spam from repeated clicks.
+  var throttleKey = 'reminderSent_' + currentWeek + '_' + adminEmail.toLowerCase();
+  if (!force) {
+    var props = PropertiesService.getScriptProperties();
+    var lastSent = props.getProperty(throttleKey);
+    if (lastSent) {
+      var ageMins = Math.round((Date.now() - parseInt(lastSent, 10)) / 60000);
+      return {
+        success: false,
+        throttled: true,
+        sentAt: lastSent,
+        message: 'A reminder for week ' + currentWeek + ' was already sent to ' + adminEmail + ' (' + ageMins + ' min ago). Use force=true to override.'
+      };
+    }
   }
 
   // Separate failures from pending
@@ -1739,6 +2314,10 @@ function sendComplianceReminders() {
   lines.push('\nThis message was generated by the Claude Usage Uploader Dashboard.');
 
   GmailApp.sendEmail(adminEmail, subject, lines.join('\n'));
+  // v2: record send timestamp so the per-week throttle works
+  try {
+    PropertiesService.getScriptProperties().setProperty(throttleKey, String(Date.now()));
+  } catch (e) { /* throttle is best-effort */ }
   return { success: true, message: 'Reminder sent to ' + adminEmail + ' for ' + nonCompliant.length + ' non-compliant developer(s).' };
 }
 
@@ -1849,6 +2428,11 @@ function adminResumeDeveloper(name) {
 
 // -------------------- SETTINGS --------------------
 
+// v2: schema version this code expects. Bump when ComplianceLog / HeartbeatLog
+// / TriggerQueue / RegisteredDevelopers columns are added or changed. The
+// `getSchemaInfo` endpoint surfaces this on the Health page.
+var SHEET_SCHEMA_VERSION = 'v2.0';
+
 function ensureSettingsSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('Settings');
@@ -1858,7 +2442,32 @@ function ensureSettingsSheet_() {
     sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
     sheet.appendRow(['uploadFrequency', 'weekly']);
   }
+  // v2: record the schema version on every doGet so a freshly cloned sheet
+  // gets stamped automatically. Idempotent — only writes if missing/older.
+  try {
+    var data = sheet.getDataRange().getValues();
+    var schemaRowIdx = -1;
+    var currentVer = '';
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][0]).trim() === 'schemaVersion') { schemaRowIdx = i + 1; currentVer = String(data[i][1]).trim(); break; }
+    }
+    if (schemaRowIdx === -1) {
+      sheet.appendRow(['schemaVersion', SHEET_SCHEMA_VERSION]);
+    } else if (currentVer !== SHEET_SCHEMA_VERSION) {
+      sheet.getRange(schemaRowIdx, 2).setValue(SHEET_SCHEMA_VERSION);
+    }
+  } catch (e) { /* non-fatal */ }
   return sheet;
+}
+
+// v2: expose schema state to the dashboard Health page
+function getSchemaInfo() {
+  ensureSettingsSheet_();
+  return {
+    expectedVersion: SHEET_SCHEMA_VERSION,
+    storedVersion: getSetting_('schemaVersion', ''),
+    methodologyVersion: 'v2.0'
+  };
 }
 
 function getSetting_(key, defaultVal) {
@@ -1898,6 +2507,24 @@ function setUploadFrequency(freq) {
 }
 
 function forceSendUpdateTrigger(name) {
+  requireAdmin_(); // v2: was unguarded — allowed any web-app caller to push UPDATE triggers
   if (!name) return { success: false, error: 'No name provided' };
   return adminQueueTrigger(name, 'UPDATE');
+}
+
+// v2: bulk-force-update — used by the Version Drift card to upgrade every
+// developer whose reported version is behind the latest manifest.
+function forceSendUpdateBatch(names) {
+  requireAdmin_();
+  if (!Array.isArray(names) || names.length === 0) return { success: false, error: 'No names provided' };
+  var ok = 0, fail = 0, errors = [];
+  names.forEach(function(n) {
+    try {
+      var r = adminQueueTrigger(n, 'UPDATE');
+      if (r && r.success) ok++; else { fail++; errors.push(n + ': ' + (r && r.error || 'unknown')); }
+    } catch (e) {
+      fail++; errors.push(n + ': ' + e.toString());
+    }
+  });
+  return { success: fail === 0, queued: ok, failed: fail, errors: errors };
 }

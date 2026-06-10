@@ -1267,4 +1267,65 @@ tbody tr:nth-child(10) { animation-delay: 0.40s; }
   body { background: #fff !important; color: #000 !important; }
   .dashboard-page { display: block !important; }
 }
+
+/* ───────────────────────── v2 ADDITIONS ───────────────────────── */
+
+/* Headline insight + ROI highlight */
+.headline-card { transition: border-color 0.3s; }
+.roi-tile-highlight { box-shadow: 0 0 0 1px rgba(168,85,247,0.25) inset, 0 12px 40px rgba(168,85,247,0.12); }
+.roi-tile-highlight .stat-value { font-size: 2.6rem !important; background: linear-gradient(135deg, var(--accent-secondary), #c084fc); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.delta-chip { display: inline-flex; align-items: center; }
+
+/* Help icon button */
+.help-icon-btn { display: inline-flex; align-items: center; justify-content: center; transition: background 0.2s; }
+.help-icon-btn:hover { background: rgba(255,255,255,0.1) !important; color: var(--text-primary) !important; }
+
+/* Fresh-data pill */
+.fresh-data-pill { display: inline-flex !important; animation: freshPulse 2s ease-in-out infinite; }
+@keyframes freshPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+
+/* Mini trend cards (Trends page small multiples) */
+.mini-trend-card { transition: transform 0.15s ease, background 0.2s ease; }
+.mini-trend-card:hover { transform: translateY(-2px); }
+
+/* Mobile sidebar (< 900px) */
+@media (max-width: 900px) {
+  #sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    width: 240px;
+  }
+  #sidebar.mobile-open {
+    transform: translateX(0);
+    box-shadow: 8px 0 40px rgba(0,0,0,0.6);
+  }
+  #content-area {
+    margin-left: 0 !important;
+    width: 100% !important;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+  header {
+    padding-left: 3rem !important; /* room for hamburger */
+  }
+  .stat-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+  .modal-grid-2 {
+    grid-template-columns: 1fr !important;
+  }
+  .table-responsive {
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 540px) {
+  .stat-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .header-actions .sync-pill-btn span,
+  .header-actions .help-icon-btn { font-size: 0.78rem; }
+}
+
+/* Toast container animations are inline (transform/opacity) — nothing extra needed */
 </style>

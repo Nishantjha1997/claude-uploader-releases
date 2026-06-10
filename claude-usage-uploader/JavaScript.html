@@ -47,6 +47,7 @@ function navigateTo(page) {
 function renderPageData(page) {
   if (page === 'overview')    renderOverviewKpis();
   if (page === 'compliance')  renderCompliancePage();
+  if (page === 'developers')  renderDevRoster();
   if (page === 'versions')    renderVersionMatrix();
   if (page === 'roster')      renderRosterKpis();
   if (page === 'health')      renderHealthKpis();
@@ -95,20 +96,24 @@ function getBadgeHtml(status) {
 }
 
 // Single source of truth for "is this user online right now?"
-// Used by the KPI counter, Live Presence table, and runOnline() — all three must agree.
+// Used by the KPI counter, Live Presence table, and runOnline() \u2014 all three must agree.
+//
+// v2 fix: previously included `lastSeen`, which the server updates on ANY
+// status (including SUCCESS/FAILURE). That meant a developer whose service
+// crashed right after a successful upload could still read as "online".
+// Now only the keep-alive signals (HEARTBEAT/PONG) count.
 function isOnline(u) {
   if (!u) return false;
   const lb = u.lastHeartbeat ? new Date(u.lastHeartbeat).getTime() : 0;
-  const ls = u.lastSeen      ? new Date(u.lastSeen).getTime()      : 0;
   const lp = u.lastPong      ? new Date(u.lastPong).getTime()      : 0;
-  const recent = Math.max(lb, ls, lp);
+  const recent = Math.max(lb, lp);
   return recent > 0 && (Date.now() - recent) / 60000 < 10;
 }
 
 function formatAbsoluteDateTime(iso) {
-  if (!iso) return '—';
+  if (!iso) return '\u2014';
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
+  if (isNaN(d.getTime())) return '\u2014';
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
     + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
@@ -117,12 +122,12 @@ function getStatusDotHtml(user) {
   if (user.paused) return '<span class="status-dot dot-offline" style="background:var(--amber)" title="User is paused"></span> Paused';
   if (user.pendingTrigger) return '<span class="status-dot dot-waiting" title="Trigger queued"></span> Queued';
   if (!user.lastSeen && !user.lastHeartbeat && !user.lastPong)
-    return '<span class="status-dot dot-stalled" title="STALLED — never seen"></span> <b style="color:var(--red)">Stalled</b>';
+    return '<span class="status-dot dot-stalled" title="STALLED \u2014 never seen"></span> <b style="color:var(--red)">Stalled</b>';
   if (isOnline(user)) return '<span class="status-dot dot-online" title="Online (<10m ago)"></span> Online';
   const minAgo = user.lastSeen ? (Date.now() - new Date(user.lastSeen).getTime()) / 60000 : Infinity;
-  if (minAgo < 60)   return '<span class="status-dot dot-away"    title="Away (10–60m ago)"></span> Away';
-  if (minAgo < 1440) return '<span class="status-dot dot-offline" title="Offline (1h–24h ago)"></span> Offline';
-  return '<span class="status-dot dot-stalled" title="STALLED — no heartbeat for >24h"></span> <b style="color:var(--red)">Stalled</b>';
+  if (minAgo < 60)   return '<span class="status-dot dot-away"    title="Away (10\u201360m ago)"></span> Away';
+  if (minAgo < 1440) return '<span class="status-dot dot-offline" title="Offline (1h\u201324h ago)"></span> Offline';
+  return '<span class="status-dot dot-stalled" title="STALLED \u2014 no heartbeat for >24h"></span> <b style="color:var(--red)">Stalled</b>';
 }
 
 function fetchData() {
@@ -306,7 +311,10 @@ function renderDashboard() {
       } else {
         startsIn = 'Now';
       }
+      // v2: bulk-select checkbox in the first cell
+      var checked = window._bulkQueueSelected && window._bulkQueueSelected[t.devName] ? 'checked' : '';
       qb.innerHTML += `<tr>
+        <td><input type="checkbox" ${checked} onchange="toggleQueueBulkSelect('${esc(t.devName).replace(/'/g, "\\'")}', this.checked)"></td>
         <td>${esc(t.devName)}</td>
         <td style="font-size:11px">${t.timestamp ? new Date(t.timestamp).toLocaleString() : ''}</td>
         <td><span class="badge ${startsIn === 'Now' ? 'b-green' : 'b-amber'}">${esc(startsIn)}</span></td>
@@ -315,11 +323,22 @@ function renderDashboard() {
       </tr>`;
     });
   }
+  // v2: prune any selections that no longer exist in the queue
+  if (window._bulkQueueSelected) {
+    var stillThere = {};
+    adminTriggers.forEach(function(t) { if (window._bulkQueueSelected[t.devName]) stillThere[t.devName] = true; });
+    window._bulkQueueSelected = stillThere;
+    var bar = document.getElementById('queueBulkBar');
+    var count = Object.keys(stillThere).length;
+    if (bar) bar.style.display = count > 0 ? 'flex' : 'none';
+    var lbl = document.getElementById('queueBulkCount');
+    if (lbl) lbl.textContent = count + ' selected';
+  }
 
   // Admin Select
   const sel = document.getElementById('adminNameSelect');
   const curSel = sel.value;
-  sel.innerHTML = '<option value="">— select developer —</option>' + adminUsers.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  sel.innerHTML = '<option value="">\u2014 select developer \u2014</option>' + adminUsers.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
   if (curSel) sel.value = curSel;
 
   // Compliance page
@@ -379,8 +398,8 @@ function renderComplianceSnapshot() {
     const det = detailMap[r.name];
     const au  = auMap[r.name];
     const statusHtml = det ? getBadgeHtml(det.status) : '<span class="badge b-grey">No Data</span>';
-    const lastUpload = au && au.lastUpload ? formatAbsoluteDateTime(au.lastUpload) : '—';
-    const version    = au && au.version    ? esc(au.version) : '—';
+    const lastUpload = au && au.lastUpload ? formatAbsoluteDateTime(au.lastUpload) : '\u2014';
+    const version    = au && au.version    ? esc(au.version) : '\u2014';
     return `<tr>
       <td style="font-weight:500">${esc(r.name)}</td>
       <td>${statusHtml}</td>
@@ -447,14 +466,14 @@ function renderRecentUploads() {
     } else if (u.message) {
       reasonHtml = `<span style="color:var(--red);font-size:11px;font-family:'JetBrains Mono',monospace;word-break:break-word">${esc(u.message)}</span>`;
     } else {
-      reasonHtml = '<span style="color:var(--t4);font-size:11px">—</span>';
+      reasonHtml = '<span style="color:var(--t4);font-size:11px">\u2014</span>';
     }
     return `<tr>
       <td style="font-weight:500">${esc(u.name)}</td>
       <td style="font-size:12px;color:var(--t2)">${formatAbsoluteDateTime(u.timestamp)}</td>
       <td style="font-size:12px;color:var(--t3)">${esc(u.weekStart)}</td>
       <td><span class="badge ${badgeCls}">${esc(u.status)}</span></td>
-      <td style="font-size:12px;color:var(--t3);font-family:'JetBrains Mono',monospace">${u.version ? esc(u.version) : '—'}</td>
+      <td style="font-size:12px;color:var(--t3);font-family:'JetBrains Mono',monospace">${u.version ? esc(u.version) : '\u2014'}</td>
       <td style="max-width:280px">${reasonHtml}</td>
     </tr>`;
   }).join('');
@@ -488,13 +507,13 @@ function renderStreakLeaderboard() {
   
   tbody.innerHTML = leaders.map((l, index) => {
     let medal = '';
-    if (index === 0 && l.streak > 0) medal = '🥇 ';
-    else if (index === 1 && l.streak > 0) medal = '🥈 ';
-    else if (index === 2 && l.streak > 0) medal = '🥉 ';
+    if (index === 0 && l.streak > 0) medal = '\ud83e\udd47 ';
+    else if (index === 1 && l.streak > 0) medal = '\ud83e\udd48 ';
+    else if (index === 2 && l.streak > 0) medal = '\ud83e\udd49 ';
     
     let streakBadge = '';
     if (l.streak >= 4) {
-      streakBadge = `<span class="badge b-green">🔥 ${l.streak} Weeks</span>`;
+      streakBadge = `<span class="badge b-green">\ud83d\udd25 ${l.streak} Weeks</span>`;
     } else if (l.streak > 0) {
       streakBadge = `<span class="badge b-indigo">${l.streak} Weeks</span>`;
     } else {
@@ -640,14 +659,14 @@ function renderGlobalQueueStatus(res) {
 // Send compliance reminders
 function sendReminders() {
   const btn = document.getElementById('sendRemindersBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Sending…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '\u23f3 Sending\u2026'; }
   google.script.run
     .withSuccessHandler(function(res) {
-      if (btn) { btn.disabled = false; btn.textContent = '✉ Send Reminders'; }
+      if (btn) { btn.disabled = false; btn.textContent = '\u2709 Send Reminders'; }
       showToast(res.message || 'Done', !res.success);
     })
     .withFailureHandler(function(err) {
-      if (btn) { btn.disabled = false; btn.textContent = '✉ Send Reminders'; }
+      if (btn) { btn.disabled = false; btn.textContent = '\u2709 Send Reminders'; }
       showToast('Send failed: ' + err.message, true);
     })
     .sendComplianceReminders();
@@ -793,22 +812,48 @@ function renderProgressHtml(name, res) {
   }
 
   // --- Standard Generate & Upload Pipeline ---
+  // v2 fix: previously the terminal check was `if (i === 0 && !hasTrigger)`,
+  // so if the newest entry happened to be a POLLING_ACK or HEARTBEAT, a
+  // FAILURE/SUCCESS at i=1 was silently ignored and the visualizer never
+  // resolved. Now we find the most recent terminal event and resolve to it
+  // unless an in-progress event is newer than it.
   let state = { ack: false, gen: false, genDone: false, up: false, upDone: false, err: false };
-  
-  // Scan backwards through recent logs
+  const TERMINAL = { SUCCESS: 1, FAILURE: 1, ERROR: 1 };
+  const PROGRESS = { POLLING_ACK: 1, GENERATE_START: 1, GENERATE_DONE: 1, UPLOAD_START: 1, UPLOAD_DONE: 1 };
+
+  // logs are newest-first; find the index of the newest terminal event
+  let termIdx = -1;
+  let termStatus = '';
   for (let i = 0; i < logs.length; i++) {
     const s = String(logs[i].status).trim().toUpperCase();
-    if (s === 'SUCCESS' || s === 'FAILURE' || s === 'ERROR') {
-      if (i === 0 && !hasTrigger) { // Terminal state
-         if (s !== 'SUCCESS') state.err = true;
-         state.ack=true; state.gen=true; state.genDone=true; state.up=true; state.upDone=true;
-      }
-      break; 
+    if (TERMINAL[s]) { termIdx = i; termStatus = s; break; }
+  }
+
+  // Determine if any progress event is *newer* than the terminal. If so we're
+  // mid-pipeline again (a new run started after the previous terminal).
+  let progressNewerThanTerminal = false;
+  if (termIdx > 0) {
+    for (let i = 0; i < termIdx; i++) {
+      const s = String(logs[i].status).trim().toUpperCase();
+      if (PROGRESS[s]) { progressNewerThanTerminal = true; break; }
     }
-    if (s === 'POLLING_ACK') state.ack = true;
-    if (s === 'GENERATE_START') { state.ack = true; state.gen = true; }
-    if (s === 'GENERATE_DONE') { state.ack = true; state.gen = true; state.genDone = true; }
-    if (s === 'UPLOAD_START') { state.ack = true; state.gen = true; state.genDone = true; state.up = true; }
+  }
+
+  if (termIdx !== -1 && !hasTrigger && !progressNewerThanTerminal) {
+    // Resolved terminal state
+    if (termStatus !== 'SUCCESS') state.err = true;
+    state.ack = true; state.gen = true; state.genDone = true; state.up = true; state.upDone = true;
+  } else {
+    // Walk progress events (only those newer than any terminal) to set the bars
+    const stopAt = termIdx === -1 ? logs.length : termIdx;
+    for (let i = 0; i < stopAt; i++) {
+      const s = String(logs[i].status).trim().toUpperCase();
+      if (s === 'POLLING_ACK')     state.ack = true;
+      if (s === 'GENERATE_START')  { state.ack = true; state.gen = true; }
+      if (s === 'GENERATE_DONE')   { state.ack = true; state.gen = true; state.genDone = true; }
+      if (s === 'UPLOAD_START')    { state.ack = true; state.gen = true; state.genDone = true; state.up = true; }
+      if (s === 'UPLOAD_DONE')     { state.ack = true; state.gen = true; state.genDone = true; state.up = true; }
+    }
   }
   
   const isDone = state.upDone && !hasTrigger;
@@ -885,7 +930,7 @@ function renderProgressHtml(name, res) {
 
 // Manage Developers
 // Renders expected-developer chips using data already present in dashboardData.
-// No server round-trip needed — dashboardData.expectedDevelopers is populated by getDashboardData.
+// No server round-trip needed \u2014 dashboardData.expectedDevelopers is populated by getDashboardData.
 function loadExpectedDevelopers() {
   var names = (dashboardData.expectedDevelopers || []);
   document.getElementById('managedDevList').innerHTML = names.map(function(n) {
@@ -897,7 +942,7 @@ function loadExpectedDevelopers() {
 }
 
 // Renders registered-developer chips using data already present in dashboardData.
-// No server round-trip needed — dashboardData.registeredDevelopers is populated by getDashboardData.
+// No server round-trip needed \u2014 dashboardData.registeredDevelopers is populated by getDashboardData.
 function loadRegisteredDevelopers() {
   var el = document.getElementById('registeredDevList');
   if (!el) return;
@@ -952,14 +997,14 @@ function syncActiveToExpected() {
   btn.disabled = true; btn.textContent = 'Syncing...';
   google.script.run
     .withSuccessHandler(function(r) {
-      btn.disabled = false; btn.textContent = '⇄ Sync Active Devs';
+      btn.disabled = false; btn.textContent = '\u21c4 Sync Active Devs';
       showToast(r.added.length > 0
         ? 'Synced ' + r.added.length + ' developer(s) to expected list'
         : 'All active developers already in expected list');
       if (r.added.length > 0) fetchData();
     })
     .withFailureHandler(function(err) {
-      btn.disabled = false; btn.textContent = '⇄ Sync Active Devs';
+      btn.disabled = false; btn.textContent = '\u21c4 Sync Active Devs';
       showToast('Sync failed: ' + err.message, true);
     })
     .adminSyncActiveToExpected();
@@ -1330,7 +1375,7 @@ function resetAutoRefresh() {
       if (isPaused()) return;
       const expanded = Object.keys(expandState).filter(n => expandState[n]);
       if (expanded.length > 0) fetchProgressBatch(expanded);
-    }, 4000);  // 4s — reduced from 1.5s to cut spreadsheet read pressure
+    }, 4000);  // 4s \u2014 reduced from 1.5s to cut spreadsheet read pressure
   }
 
   if (!lastModifiedInterval) {
@@ -1347,7 +1392,7 @@ function resetAutoRefresh() {
           }
         })
         .getLastModified();
-    }, 10000);  // 10s — reduced from 5s to cut concurrent GAS invocations
+    }, 10000);  // 10s \u2014 reduced from 5s to cut concurrent GAS invocations
   }
 }
 
@@ -1455,7 +1500,7 @@ function renderOverviewKpis() {
     <div class="kpi-card"><div class="kpi-val" style="color:var(--purple)">${triggerQueue.length}</div><div class="kpi-label">Queued Runs</div></div>
   `;
 
-  // Alert Rail — meaningful signals only
+  // Alert Rail \u2014 meaningful signals only
   var alerts = [];
   if (notUploaded > 0) alerts.push({ cls: 'alert-warn', text: notUploaded + ' registered dev' + (notUploaded === 1 ? '' : 's') + ' haven\'t uploaded this week' });
   if (stats.failed > 0) alerts.push({ cls: 'alert-crit', text: stats.failed + ' upload failure' + (stats.failed === 1 ? '' : 's') + ' detected' });
@@ -1595,42 +1640,88 @@ function saveUploadFrequency() {
 }
 
 function renderDevRoster() {
-  const { expectedDevelopers=[], registeredDevelopers=[], activeUsers=[], complianceByWeek={}, currentWeek='' } = dashboardData;
-  const registeredNames = registeredDevelopers.map(r => r.name);
-  const stats = complianceByWeek[currentWeek] || { details: [] };
-  const details = stats.details || [];
-  const tbody = document.getElementById('devRosterTbody');
+  const { registeredDevelopers=[], activeUsers=[] } = dashboardData;
+  const tbody  = document.getElementById('devRosterTbody');
+  const kpiContainer = document.getElementById('developersKpis');
   if (!tbody) return;
 
-  tbody.innerHTML = expectedDevelopers.map(name => {
-    const isReg = registeredNames.includes(name);
-    const activeU = activeUsers.find(u => u.name === name);
-    const wkDet = details.find(d => d.name === name);
+  // Count KPI totals
+  let onlineCount  = 0;
+  let offlineCount = 0;
+  let stalledCount = 0;
 
-    var regBadge = isReg ? '<span class="badge b-green">Registered</span>' : '<span class="badge b-amber">Pending</span>';
-    var presBadge = '<span class="badge b-grey">Unknown</span>';
-    if (activeU) presBadge = getStatusDotHtml(activeU);
+  const rosterRows = registeredDevelopers.map(function(reg) {
+    const name    = reg.name || reg;
+    const activeU = activeUsers.find(function(u) { return u.name === name; }) || {};
 
-    var weekBadge = '<span class="badge b-grey">Pending</span>';
-    if (wkDet && wkDet.status === 'SUCCESS') weekBadge = '<span class="badge b-green">Uploaded</span>';
-    else if (wkDet && (wkDet.status === 'FAILURE' || wkDet.status === 'ERROR')) weekBadge = '<span class="badge b-red">Failed</span>';
+    // Version badge
+    const ver = activeU.version || '\u2014';
+    const verBadge = ver !== '\u2014'
+      ? `<span class="badge b-indigo" style="font-family:monospace">v${esc(ver)}</span>`
+      : `<span class="badge b-grey">Unknown</span>`;
 
-    var lastUp = activeU && activeU.lastUpload ? timeSince(activeU.lastUpload) : 'Never';
+    // Status dot & KPI tallying
+    let statusHtml;
+    if (!activeU.name) {
+      statusHtml = '<span class="status-dot dot-stalled"></span> <b style="color:var(--red)">Never seen</b>';
+      stalledCount++;
+    } else if (isOnline(activeU)) {
+      statusHtml = getStatusDotHtml(activeU);
+      onlineCount++;
+    } else {
+      const minAgo = activeU.lastSeen ? (Date.now() - new Date(activeU.lastSeen).getTime()) / 60000 : Infinity;
+      statusHtml = getStatusDotHtml(activeU);
+      if (minAgo >= 1440) stalledCount++;
+      else offlineCount++;
+    }
+
+    // Last Seen \u2014 absolute datetime
+    const lastSeenRel = activeU.lastSeen ? timeSince(activeU.lastSeen)
+                      : (activeU.lastHeartbeat ? timeSince(activeU.lastHeartbeat) : 'Never');
+    const lastSeenAbs = activeU.lastSeen ? formatAbsoluteDateTime(activeU.lastSeen)
+                      : (activeU.lastHeartbeat ? formatAbsoluteDateTime(activeU.lastHeartbeat) : '');
+    const lastSeenHtml = lastSeenAbs
+      ? `<span title="${esc(lastSeenAbs)}" style="cursor:default">${esc(lastSeenRel)}</span>`
+      : 'Never';
+
+    // Last Upload \u2014 relative
+    const lastUploadRel = activeU.lastUpload ? timeSince(activeU.lastUpload) : 'Never';
+    const lastUploadAbs = activeU.lastUpload ? formatAbsoluteDateTime(activeU.lastUpload) : '';
+    const lastUploadHtml = lastUploadAbs
+      ? `<span style="font-size:12px;color:var(--t2);font-weight:600">${esc(lastUploadRel)}</span>
+         <br><span style="font-size:11px;color:var(--t3)">Based on data uploaded on ${esc(lastUploadAbs)}</span>`
+      : '<span style="font-size:12px;color:var(--t3)">Never uploaded</span>';
 
     return `<tr>
       <td style="font-weight:600">${esc(name)}</td>
-      <td>${regBadge}</td>
-      <td><div class="status-cell">${presBadge}</div></td>
-      <td>${weekBadge}</td>
-      <td style="font-size:12px;color:var(--t3)">${lastUp}</td>
+      <td>${verBadge}</td>
+      <td><div class="status-cell">${statusHtml}</div></td>
+      <td>${lastSeenHtml}</td>
+      <td>${lastUploadHtml}</td>
       <td>
         <div class="action-cell">
-          <button class="btn btn-primary btn-sm js-force-run" data-name="${esc(name)}">&#9654;</button>
+          <button class="btn btn-primary btn-sm ${activeU.pendingTrigger ? 'btn-queued' : ''} js-force-run" data-name="${esc(name)}" ${activeU.pendingTrigger ? 'disabled' : ''}>
+            ${activeU.pendingTrigger ? '&#9203; Queued' : '&#9654; Generate'}
+          </button>
           <button class="btn btn-ghost btn-sm js-show-logs" data-name="${esc(name)}">Logs</button>
         </div>
       </td>
     </tr>`;
-  }).join('');
+  });
+
+  // Render KPI strip
+  if (kpiContainer) {
+    kpiContainer.innerHTML = `
+      <div class="kpi-card"><div class="kpi-val sv-indigo">${registeredDevelopers.length}</div><div class="kpi-label">Registered Devs</div></div>
+      <div class="kpi-card"><div class="kpi-val sv-green">${onlineCount}</div><div class="kpi-label">Online Now</div></div>
+      <div class="kpi-card"><div class="kpi-val sv-amber">${offlineCount}</div><div class="kpi-label">Offline</div></div>
+      <div class="kpi-card"><div class="kpi-val ${stalledCount > 0 ? 'sv-red' : 'sv-green'}">${stalledCount}</div><div class="kpi-label">Stalled (&gt;24h)</div></div>
+    `;
+  }
+
+  tbody.innerHTML = rosterRows.length
+    ? rosterRows.join('')
+    : '<tr><td colspan="6" class="empty-state">No registered developers found.</td></tr>';
 }
 
 // Global Search
@@ -1646,7 +1737,30 @@ document.getElementById('globalSearch').addEventListener('input', function(e) {
 
 
 // ==================== VERSION MATRIX PAGE RENDERERS ====================
-const LATEST_VERSION = '2.0.1';
+// v2: live value is dynamically fetched from the Gist at runtime (client-side)
+// to bypass server cache/fetch issues and prevent hardcoding.
+let LATEST_VERSION_FALLBACK = '2.0.2';
+function fetchLatestVersionFromGist() {
+  fetch('https://gist.githubusercontent.com/Nishantjha1997/ad763c62484a3ea70e7507bf671df0bb/raw/version.json')
+    .then(r => r.json())
+    .then(json => {
+      if (json && json.latestVersion) {
+        LATEST_VERSION_FALLBACK = json.latestVersion;
+        if (dashboardData) {
+          dashboardData.latestVersion = json.latestVersion;
+        }
+        if (typeof renderVersionMatrix === 'function') {
+          try { renderVersionMatrix(); } catch(e) {}
+        }
+      }
+    })
+    .catch(e => console.warn('Failed to fetch version from gist:', e));
+}
+fetchLatestVersionFromGist();
+
+function getLatestVersionClient() {
+  return (dashboardData && dashboardData.latestVersion) || LATEST_VERSION_FALLBACK;
+}
 
 function compareVersions(v1, v2) {
   const parts1 = v1.replace(/^v/, '').split('.').map(Number);
@@ -1664,18 +1778,47 @@ function renderVersionMatrix() {
   const { activeUsers=[] } = dashboardData;
   const grid = document.getElementById('versionMatrixGrid');
   if (!grid) return;
-  
+
   if (!activeUsers || activeUsers.length === 0) {
     grid.innerHTML = '<div class="empty-state">No active users found.</div>';
+    var dk = document.getElementById('versionDriftKpi'); if (dk) dk.innerHTML = '';
     return;
   }
-  
+
+  // v2: drift KPI strip + "Force update all outdated" action
+  const latest = getLatestVersionClient();
+  const byVer = {};
+  let outdatedNames = [];
+  activeUsers.forEach(function(u) {
+    var v = u.version || 'unknown';
+    byVer[v] = (byVer[v] || 0) + 1;
+    if (u.version && compareVersions(u.version, latest) < 0) outdatedNames.push(u.name);
+  });
+  const driftKpi = document.getElementById('versionDriftKpi');
+  if (driftKpi) {
+    const verChips = Object.keys(byVer).sort().map(function(v) {
+      const isLatest = v === latest;
+      const color = isLatest ? 'var(--green,#10b981)' : v === 'unknown' ? 'var(--muted,#94a3b8)' : 'var(--amber,#f59e0b)';
+      return '<span style="display:inline-flex;align-items:center;gap:0.4rem;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:999px;padding:0.3rem 0.7rem;font-size:0.8rem;margin-right:0.4rem;"><span style="width:8px;height:8px;border-radius:50%;background:' + color + ';"></span><b>v' + esc(v) + '</b> <span style="color:var(--muted);">\u00d7' + byVer[v] + '</span></span>';
+    }).join('');
+    const action = outdatedNames.length > 0
+      ? '<button class="btn btn-primary btn-sm" onclick="forceUpdateAllOutdated()" style="margin-left:auto;">&#9881; Force update ' + outdatedNames.length + ' outdated</button>'
+      : '<span style="color:var(--green,#10b981);font-weight:600;">All up to date</span>';
+    driftKpi.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:0.85rem 1rem;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:10px;margin-bottom:1rem;flex-wrap:wrap;">' +
+      '<div><span style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);">Latest manifest</span> <b>v' + esc(latest) + '</b></div>' +
+      '<div>' + verChips + '</div>' +
+      '<div style="margin-left:auto;">' + action + '</div>' +
+      '</div>';
+  }
+  window._outdatedVersionNames = outdatedNames; // stash for the bulk-update button
+
   // Sort users alphabetically
   const sorted = activeUsers.slice().sort((a,b) => a.name.localeCompare(b.name));
   
   grid.innerHTML = sorted.map(u => {
     const ver = u.version || '1.9.0';
-    const isUpToDate = compareVersions(ver, LATEST_VERSION) >= 0;
+    const isUpToDate = compareVersions(ver, getLatestVersionClient()) >= 0;
     const badgeClass = isUpToDate ? 'version-badge-green' : 'version-badge-orange';
     const badgeText = isUpToDate ? 'v' + ver + ' (Secure)' : 'v' + ver + ' (Outdated)';
     
@@ -1755,7 +1898,7 @@ function changeTheme(theme) {
 (function() {
   var saved = localStorage.getItem('dashboard-theme') || 'default';
   if (saved !== 'default') document.body.setAttribute('data-theme', saved);
-  // Pill active state is set after DOM ready in window.onload → re-apply
+  // Pill active state is set after DOM ready in window.onload \u2192 re-apply
   window.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.theme-pill').forEach(function(btn) {
       btn.classList.toggle('active', btn.getAttribute('data-theme') === saved);
@@ -1764,4 +1907,371 @@ function changeTheme(theme) {
 })();
 
 window.onload = fetchData;
+
+/* \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 v2 ADDITIONS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+
+// v2: short helper used everywhere a non-blocking success/error needs to surface.
+function showToastV2(msg, variant) {
+  variant = variant || 'info';
+  // Reuse the existing toast if available; otherwise build an ephemeral one.
+  var legacy = document.getElementById('toast');
+  if (legacy && variant !== 'warn') {
+    showToast(msg, variant === 'error');
+    return;
+  }
+  var container = document.getElementById('toastContainerV2');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toastContainerV2';
+    container.style.cssText = 'position:fixed;top:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;pointer-events:none;';
+    document.body.appendChild(container);
+  }
+  var colors = {
+    info:    { bg: 'rgba(37,99,235,0.18)',  bd: 'rgba(37,99,235,0.4)',  fg: '#60a5fa' },
+    success: { bg: 'rgba(16,185,129,0.18)', bd: 'rgba(16,185,129,0.4)', fg: '#34d399' },
+    warn:    { bg: 'rgba(245,158,11,0.18)', bd: 'rgba(245,158,11,0.4)', fg: '#fbbf24' },
+    error:   { bg: 'rgba(239,68,68,0.18)',  bd: 'rgba(239,68,68,0.4)',  fg: '#f87171' }
+  };
+  var c = colors[variant] || colors.info;
+  var el = document.createElement('div');
+  el.style.cssText = 'pointer-events:auto;background:' + c.bg + ';border:1px solid ' + c.bd + ';color:' + c.fg + ';padding:0.7rem 1rem;border-radius:8px;font-size:0.85rem;max-width:380px;box-shadow:0 8px 24px rgba(0,0,0,0.3);backdrop-filter:blur(10px);';
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(function() { el.style.opacity = '0'; el.style.transform = 'translateX(20px)'; el.style.transition = 'all 0.25s'; setTimeout(function() { el.remove(); }, 260); }, 3500);
+}
+
+// v2: headline insight card at the top of the Overview page. Summarizes the
+// single most-actionable metric ("Compliance 86% \u2014 7 devs missing this week").
+function renderHeadlineInsight() {
+  var card = document.getElementById('headlineInsight');
+  if (!card || !dashboardData) return;
+  var users = dashboardData.activeUsers || [];
+  var registered = dashboardData.registeredDevelopers || [];
+  var expected = dashboardData.expectedDevelopers || [];
+  var currentWeek = dashboardData.currentWeek || '';
+  var weekBucket = (dashboardData.complianceByWeek && dashboardData.complianceByWeek[currentWeek]) || { details: [], reported: 0, failed: 0, pending: 0, expected: 0 };
+  var total = weekBucket.expected || (registered.length + expected.length);
+  var compliant = weekBucket.reported || 0;
+  var failed = weekBucket.failed || 0;
+  var missing = Math.max(0, total - compliant - failed);
+  var pct = total > 0 ? Math.round((compliant / total) * 100) : 0;
+  var stalledCount = users.filter(function(u) {
+    var lb = u.lastHeartbeat ? new Date(u.lastHeartbeat).getTime() : 0;
+    var lp = u.lastPong ? new Date(u.lastPong).getTime() : 0;
+    var keepalive = Math.max(lb, lp);
+    if (!keepalive) return false;
+    return (Date.now() - keepalive) / 3600000 >= 24;
+  }).length;
+  var onlineCount = users.filter(isOnline).length;
+  var headline = '<strong>' + pct + '% compliance</strong> for week of ' + esc(currentWeek) + ' \u2014 ' +
+    '<span style="color:var(--green,#10b981);font-weight:600;">' + compliant + ' reported</span>';
+  if (failed > 0) headline += ', <span style="color:var(--red,#ef4444);font-weight:600;">' + failed + ' failed</span>';
+  if (missing > 0) headline += ', <span style="color:var(--amber,#f59e0b);font-weight:600;">' + missing + ' missing</span>';
+  headline += '. <span style="color:var(--muted);">' + onlineCount + '/' + total + ' online now';
+  if (stalledCount > 0) headline += ' \u00b7 <span style="color:var(--red,#ef4444);">' + stalledCount + ' stalled &gt;24h</span>';
+  headline += '.</span>';
+  card.innerHTML = headline;
+  card.style.display = 'block';
+}
+
+// v2: methodology drawer (parity with ROI dashboard v2)
+function openMethodologyDrawer() {
+  var d = document.getElementById('methodologyDrawer');
+  if (!d) return;
+  var liveEl = document.getElementById('methodologyLiveValues');
+  if (liveEl) {
+    var s = dashboardData || {};
+    liveEl.innerHTML =
+      '\u2022 <strong>Methodology version:</strong> ' + esc(s.methodologyVersion || 'v2.0') + '<br>' +
+      '\u2022 <strong>Sheet schema:</strong> ' + esc(s.schemaVersion || '(not stamped)') + '<br>' +
+      '\u2022 <strong>Latest binary:</strong> v' + esc(getLatestVersionClient()) + '<br>' +
+      '\u2022 <strong>Current week (script TZ):</strong> ' + esc(s.currentWeek || '\u2014') + '<br>' +
+      '\u2022 <strong>Online threshold:</strong> last heartbeat/pong within 10 min<br>' +
+      '\u2022 <strong>Stalled threshold:</strong> 24h since last heartbeat (auto-stall alert if installed)<br>' +
+      '\u2022 <strong>Daily auto-generate:</strong> ' + (s.autoGenerateEnabled === false ? 'OFF' : 'ON (first online + 10 min)') + '<br>' +
+      '\u2022 <strong>HMAC window:</strong> 5 min staleness + 60s future tolerance + replay-nonce cache';
+  }
+  d.classList.add('open');
+}
+function closeMethodologyDrawer() {
+  var d = document.getElementById('methodologyDrawer');
+  if (d) d.classList.remove('open');
+}
+
+// v2: mobile sidebar toggle (matches ROI dashboard pattern)
+function toggleMobileSidebar() {
+  var sb = document.querySelector('aside.sidebar') || document.getElementById('sidebar');
+  if (sb) sb.classList.toggle('mobile-open');
+}
+
+// v2: 12-week compliance trend chart \u2014 stacked bars per week (compliant /
+// failed / missing) so admins see directional change at a glance.
+function renderComplianceTrendChart() {
+  var container = document.getElementById('complianceTrendChart');
+  if (!container || !dashboardData) return;
+  var trend = dashboardData.complianceTrend || [];
+  if (trend.length === 0) {
+    container.innerHTML = '<div class="empty-state">No trend data available.</div>';
+    return;
+  }
+  var W = container.clientWidth || 720;
+  var H = 220;
+  var pad = { l: 40, r: 16, t: 18, b: 36 };
+  var innerW = W - pad.l - pad.r;
+  var innerH = H - pad.t - pad.b;
+  var barW = Math.max(8, (innerW / trend.length) * 0.65);
+  var step = innerW / trend.length;
+  var maxStack = 0;
+  trend.forEach(function(t) { var s = t.compliant + t.failed + t.missing; if (s > maxStack) maxStack = s; });
+  if (maxStack === 0) maxStack = 1;
+  function y(v) { return pad.t + innerH - (v / maxStack) * innerH; }
+  var bars = trend.map(function(t, i) {
+    var x = pad.l + step * i + (step - barW) / 2;
+    var cH = (t.compliant / maxStack) * innerH;
+    var fH = (t.failed    / maxStack) * innerH;
+    var mH = (t.missing   / maxStack) * innerH;
+    var yTop = pad.t + innerH - cH - fH - mH;
+    var label = String(t.week || '').substring(5); // MM-DD only
+    return (
+      '<g><title>' + esc(t.week) + ': ' + t.compliant + ' compliant / ' + t.failed + ' failed / ' + t.missing + ' missing</title>' +
+      '<rect x="' + x + '" y="' + yTop + '" width="' + barW + '" height="' + cH + '" fill="var(--green,#10b981)" opacity="0.85"/>' +
+      '<rect x="' + x + '" y="' + (yTop + cH) + '" width="' + barW + '" height="' + fH + '" fill="var(--red,#ef4444)" opacity="0.85"/>' +
+      '<rect x="' + x + '" y="' + (yTop + cH + fH) + '" width="' + barW + '" height="' + mH + '" fill="var(--amber,#f59e0b)" opacity="0.7"/>' +
+      '<text x="' + (x + barW / 2) + '" y="' + (H - 14) + '" text-anchor="middle" font-size="9" fill="var(--muted,#94a3b8)">' + esc(label) + '</text>' +
+      '</g>'
+    );
+  }).join('');
+  // y gridlines
+  var gridY = '';
+  for (var g = 0; g <= 4; g++) {
+    var yy = pad.t + (innerH * g / 4);
+    var v = Math.round(maxStack * (1 - g / 4));
+    gridY += '<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (pad.l + innerW) + '" y2="' + yy + '" stroke="rgba(255,255,255,0.05)"/>' +
+             '<text x="' + (pad.l - 6) + '" y="' + (yy + 4) + '" text-anchor="end" font-size="9" fill="var(--muted,#94a3b8)">' + v + '</text>';
+  }
+  // Legend
+  var legend = '<g transform="translate(' + (pad.l) + ',' + (pad.t - 6) + ')">' +
+    '<rect width="9" height="9" y="-7" fill="var(--green,#10b981)"/><text x="14" y="1" font-size="10" fill="var(--text,#e2e8f0)">Compliant</text>' +
+    '<rect x="80" width="9" height="9" y="-7" fill="var(--red,#ef4444)"/><text x="94" y="1" font-size="10" fill="var(--text,#e2e8f0)">Failed</text>' +
+    '<rect x="150" width="9" height="9" y="-7" fill="var(--amber,#f59e0b)"/><text x="164" y="1" font-size="10" fill="var(--text,#e2e8f0)">Missing</text>' +
+    '</g>';
+  container.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '">' + gridY + bars + legend + '</svg>';
+}
+
+// v2: Onboarding strip (registered devs whose first ping was within the last
+// 14 days). Surfaces new hires so they're not mistaken for stalled devs.
+function renderOnboardingStrip() {
+  var strip = document.getElementById('onboardingStrip');
+  if (!strip || !dashboardData) return;
+  var registered = dashboardData.registeredDevelopers || [];
+  var now = Date.now();
+  var newHires = registered.filter(function(d) {
+    if (!d.registeredAt) return false;
+    var t = new Date(d.registeredAt).getTime();
+    if (!t) return false;
+    return (now - t) / (3600 * 1000 * 24) < 14;
+  }).sort(function(a, b) { return new Date(b.registeredAt) - new Date(a.registeredAt); });
+  if (newHires.length === 0) { strip.style.display = 'none'; strip.innerHTML = ''; return; }
+  strip.style.display = 'block';
+  strip.innerHTML =
+    '<div style="background:rgba(34,197,94,0.05);border:1px solid rgba(34,197,94,0.2);border-left:3px solid #22c55e;border-radius:10px;padding:0.9rem 1.1rem;margin:1rem 0;">' +
+      '<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#4ade80;margin-bottom:0.5rem;">\ud83c\udf31 Onboarding \u2014 give it 14 days</div>' +
+      '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">' +
+        newHires.map(function(d) {
+          var initials = d.name.split(' ').map(function(p) { return p.charAt(0); }).join('').substring(0, 2).toUpperCase();
+          var days = Math.round((now - new Date(d.registeredAt).getTime()) / (3600 * 1000 * 24));
+          return '<span style="display:inline-flex;align-items:center;gap:0.45rem;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:999px;padding:0.3rem 0.7rem;font-size:0.78rem;">' +
+            '<span style="width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,#22c55e,#06b6d4);color:#fff;font-size:0.6rem;font-weight:800;display:flex;align-items:center;justify-content:center;">' + esc(initials) + '</span>' +
+            '<b>' + esc(d.name) + '</b>' +
+            '<span style="color:var(--muted,#94a3b8);font-size:0.7rem;">' + days + 'd</span>' +
+            '</span>';
+        }).join('') +
+      '</div>' +
+    '</div>';
+}
+
+// v2: force-update all outdated devs (uses server-side bulk endpoint)
+function forceUpdateAllOutdated() {
+  var names = window._outdatedVersionNames || [];
+  if (names.length === 0) { showToastV2('No outdated devs', 'info'); return; }
+  if (!confirm('Queue UPDATE triggers for ' + names.length + ' outdated developer(s)?')) return;
+  showToastV2('Queueing updates...', 'info');
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (r && r.success) showToastV2('Queued UPDATE for ' + (r.queued || 0) + ' devs', 'success');
+      else showToastV2('Some failed: ' + ((r && r.errors && r.errors.length) || 0) + ' errors', 'warn');
+      fetchData();
+    })
+    .withFailureHandler(function(e) { showToastV2('Bulk update failed: ' + e.toString(), 'error'); })
+    .forceSendUpdateBatch(names);
+}
+
+// v2: bulk-select trigger queue. Toggles a checkbox column and lets admins
+// cancel a multi-selection in one click instead of one-by-one.
+window._bulkQueueSelected = {};
+function toggleQueueBulkSelect(name, checked) {
+  if (checked) window._bulkQueueSelected[name] = true;
+  else delete window._bulkQueueSelected[name];
+  var bar = document.getElementById('queueBulkBar');
+  var count = Object.keys(window._bulkQueueSelected).length;
+  if (bar) {
+    bar.style.display = count > 0 ? 'flex' : 'none';
+    var lbl = document.getElementById('queueBulkCount');
+    if (lbl) lbl.textContent = count + ' selected';
+  }
+}
+function cancelSelectedTriggers() {
+  var names = Object.keys(window._bulkQueueSelected);
+  if (names.length === 0) return;
+  if (!confirm('Cancel ' + names.length + ' pending trigger(s)?')) return;
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (r && r.success) {
+        showToastV2('Cancelled ' + r.cancelled + ' trigger(s)', 'success');
+        window._bulkQueueSelected = {};
+        fetchData();
+      } else {
+        showToastV2('Bulk cancel failed', 'error');
+      }
+    })
+    .withFailureHandler(function(e) { showToastV2('Bulk cancel failed: ' + e.toString(), 'error'); })
+    .adminCancelTriggerBatch(names);
+}
+
+// v2: auto-generate toggle UI helper (called from Health page)
+function loadAutoGenStatus() {
+  google.script.run
+    .withSuccessHandler(function(r) {
+      var box = document.getElementById('autoGenStatusBox');
+      if (!box || !r) return;
+      box.innerHTML =
+        '<div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">' +
+          '<span style="display:inline-flex;align-items:center;gap:0.4rem;padding:0.3rem 0.7rem;border-radius:999px;background:' + (r.enabled ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.15)') + ';color:' + (r.enabled ? '#34d399' : '#94a3b8') + ';font-weight:700;font-size:0.78rem;">' +
+            (r.enabled ? '\u25cf Enabled' : '\u25cb Disabled') +
+          '</span>' +
+          '<span style="color:var(--muted,#94a3b8);font-size:0.85rem;">' + esc(r.description) + '</span>' +
+          '<button class="btn btn-sm ' + (r.enabled ? 'btn-ghost' : 'btn-primary') + '" onclick="toggleAutoGen(' + (r.enabled ? 'false' : 'true') + ')" style="margin-left:auto;">' + (r.enabled ? 'Disable' : 'Enable') + '</button>' +
+        '</div>';
+    })
+    .getAutoGenerateStatus();
+}
+function toggleAutoGen(enable) {
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (r && r.success) {
+        showToastV2('Daily auto-generate ' + (enable ? 'enabled' : 'disabled'), 'success');
+        loadAutoGenStatus();
+      } else {
+        showToastV2('Failed to toggle auto-generate', 'error');
+      }
+    })
+    .withFailureHandler(function(e) { showToastV2('Toggle failed: ' + e.toString(), 'error'); })
+    .setAutoGenerateEnabled(!!enable);
+}
+
+// v2: admin allowlist editor (Health page)
+function loadAdminAllowlist() {
+  google.script.run
+    .withSuccessHandler(function(r) {
+      var box = document.getElementById('adminAllowlistBox');
+      if (!box || !r) return;
+      var pilotBadge = r.pilotMode
+        ? '<span style="color:#fbbf24;font-weight:600;">PILOT MODE (no allowlist \u2014 anyone can admin)</span>'
+        : '<span style="color:#34d399;font-weight:600;">LOCKED (' + r.allowlist.length + ' admin(s))</span>';
+      box.innerHTML =
+        '<div style="font-size:0.85rem;margin-bottom:0.5rem;">Current state: ' + pilotBadge + '</div>' +
+        '<div style="font-size:0.78rem;color:var(--muted,#94a3b8);margin-bottom:0.5rem;">You are signed in as <code>' + esc(r.currentUserEmail || 'anonymous') + '</code></div>' +
+        '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-start;">' +
+          '<input type="text" id="adminAllowlistInput" class="form-control" placeholder="comma-separated admin emails" value="' + esc((r.allowlist || []).join(',')) + '" style="flex:1;min-width:240px;">' +
+          '<button class="btn btn-primary btn-sm" onclick="saveAdminAllowlist()">Save</button>' +
+        '</div>';
+    })
+    .getAdminAllowlistInfo();
+}
+function saveAdminAllowlist() {
+  var input = document.getElementById('adminAllowlistInput');
+  if (!input) return;
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (r && r.success) {
+        showToastV2('Admin allowlist saved (' + r.allowlist.length + ' admin(s))', 'success');
+        loadAdminAllowlist();
+      } else {
+        showToastV2('Save failed', 'error');
+      }
+    })
+    .withFailureHandler(function(e) { showToastV2('Save failed: ' + e.toString(), 'error'); })
+    .setAdminAllowlist(input.value);
+}
+
+// v2: stall scan controls (Health page)
+function loadStallControls() {
+  google.script.run
+    .withSuccessHandler(function(installed) {
+      var box = document.getElementById('stallScanBox');
+      if (!box) return;
+      box.innerHTML =
+        '<div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">' +
+          '<span style="display:inline-flex;align-items:center;gap:0.4rem;padding:0.3rem 0.7rem;border-radius:999px;background:' + (installed ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.15)') + ';color:' + (installed ? '#34d399' : '#94a3b8') + ';font-weight:700;font-size:0.78rem;">' +
+            (installed ? '\u25cf Hourly scan active' : '\u25cb Not scheduled') +
+          '</span>' +
+          '<span style="color:var(--muted,#94a3b8);font-size:0.82rem;flex:1;">Scans every hour for devs whose last heartbeat is older than the stall threshold (default 24h) and emails the admin allowlist once per stall cycle.</span>' +
+          '<button class="btn btn-sm ' + (installed ? 'btn-ghost' : 'btn-primary') + '" onclick="' + (installed ? 'uninstallStall()' : 'installStall()') + '">' + (installed ? 'Uninstall' : 'Install') + '</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="runStallNow()">Run now</button>' +
+        '</div>';
+    })
+    .isStallTriggerInstalled();
+}
+function installStall() {
+  google.script.run
+    .withSuccessHandler(function(r) { showToastV2(r && r.message || 'Installed', 'success'); loadStallControls(); })
+    .withFailureHandler(function(e) { showToastV2('Install failed: ' + e.toString(), 'error'); })
+    .installStallTrigger();
+}
+function uninstallStall() {
+  google.script.run
+    .withSuccessHandler(function(r) { showToastV2('Removed ' + (r && r.removed || 0) + ' trigger(s)', 'success'); loadStallControls(); })
+    .withFailureHandler(function(e) { showToastV2('Uninstall failed: ' + e.toString(), 'error'); })
+    .uninstallStallTrigger();
+}
+function runStallNow() {
+  showToastV2('Running stall scan...', 'info');
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (r && r.success) showToastV2('Scanned: ' + r.stalledCount + ' stalled, ' + r.newlyAlerted + ' newly alerted', 'success');
+      else showToastV2('Scan failed', 'error');
+    })
+    .withFailureHandler(function(e) { showToastV2('Scan failed: ' + e.toString(), 'error'); })
+    .runStallScan();
+}
+
+// v2: hook the new render functions into the existing renderPageData flow.
+// We wrap the prior function rather than re-define so the original tab logic stays intact.
+(function() {
+  var _origRenderPageData = renderPageData;
+  renderPageData = function(page) {
+    _origRenderPageData(page);
+    // After existing renderers run, layer in v2 enhancements
+    if (page === 'overview') {
+      try { renderHeadlineInsight(); } catch (e) {}
+      try { renderComplianceTrendChart(); } catch (e) {}
+    }
+    if (page === 'compliance') {
+      try { renderComplianceTrendChart(); } catch (e) {}
+    }
+    if (page === 'roster') {
+      try { renderOnboardingStrip(); } catch (e) {}
+    }
+    if (page === 'health') {
+      try { loadAutoGenStatus(); } catch (e) {}
+      try { loadAdminAllowlist(); } catch (e) {}
+      try { loadStallControls(); } catch (e) {}
+    }
+  };
+})();
+
+// v2: ESC closes the methodology drawer
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeMethodologyDrawer();
+});
 </script>
