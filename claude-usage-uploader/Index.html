@@ -66,7 +66,7 @@
         <span class="nav-icon">&#128202;</span><span>Compliance</span>
       </div>
       <div class="nav-item" data-page="developers" onclick="navigateTo('developers')">
-        <span class="nav-icon">&#128100;</span><span>Developers</span>
+        <span class="nav-icon">&#9989;</span><span>Registered Users</span>
       </div>
       <div class="nav-item" data-page="versions" onclick="navigateTo('versions')">
         <span class="nav-icon">&#128187;</span><span>Version Matrix</span>
@@ -74,9 +74,6 @@
       <div class="nav-label">Management</div>
       <div class="nav-item" data-page="queue" onclick="navigateTo('queue')">
         <span class="nav-icon">&#9881;</span><span>Queue & Runs</span>
-      </div>
-      <div class="nav-item" data-page="roster" onclick="navigateTo('roster')">
-        <span class="nav-icon">&#128101;</span><span>Registration</span>
       </div>
       <div class="nav-item" data-page="health" onclick="navigateTo('health')">
         <span class="nav-icon">&#128268;</span><span>System Health</span>
@@ -334,25 +331,92 @@
         <!-- Developer KPIs -->
         <div class="kpi-strip" id="developersKpis" style="margin-bottom: 1.5rem;"></div>
 
+        <!-- v3: Onboarding strip &#8212; devs whose first ping was within the last 14 days -->
+        <div id="onboardingStrip" style="display:none;"></div>
+
+        <!-- Manual registration -->
+        <div class="card" style="margin-bottom: 1.5rem;">
+          <div class="section-hd">
+            <div>
+              <div class="section-title">Register New Developer</div>
+              <div class="section-sub">Add a developer to track compliance and manage their status. Developers are also auto-registered on their uploader's first ping.</div>
+            </div>
+          </div>
+          <div class="manage-add">
+            <input type="text" id="newRegDevName" placeholder="Developer Full Name (e.g. Jane Smith)"
+                   onkeydown="if(event.key==='Enter')addRegisteredDeveloperManual()">
+            <button class="btn btn-primary btn-sm" onclick="addRegisteredDeveloperManual()">+ Register</button>
+          </div>
+        </div>
+
         <div class="card">
           <div class="section-hd">
             <div>
-              <div class="section-title">Developer Roster</div>
-              <div class="section-sub">Unified view of registered developers active on the utility</div>
+              <div class="section-title">Registered Users Roster</div>
+              <div class="section-sub">All registered developers &#8212; live presence, activity, and management actions</div>
             </div>
           </div>
           <div class="table-wrap">
             <table class="data-table" id="devRosterTable">
               <thead><tr>
                 <th>Name</th>
-                <th>Version</th>
-                <th>Status</th>
-                <th>Last Seen</th>
+                <th>Live Presence</th>
+                <th>Last Active</th>
                 <th>Last Upload</th>
+                <th>Version</th>
                 <th>Actions</th>
               </tr></thead>
               <tbody id="devRosterTbody"></tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- v3: CSV Roster Reconciliation -->
+        <div class="card" style="margin-top: 1.5rem;">
+          <div class="card-hd">
+            <div class="card-hd-left">
+              <div class="card-icon ci-indigo">&#128196;</div>
+              <div>
+                <div class="card-title">CSV Roster Reconciliation</div>
+                <div class="card-subtitle">Upload your active-developer list to spot unregistered users and registered developers who should be paused or removed</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Upload Zone -->
+          <div class="upload-zone" id="csvUploadZone">
+            <div style="font-size: 24px; color: var(--indigo); margin-bottom: 10px;">&#128197;</div>
+            <div style="font-size: 13px; font-weight: 600;">Drag &amp; drop CSV file here or click to browse</div>
+            <div style="font-size: 11px; color: var(--t3); margin-top: 4px;">Expects one developer name per line, or a standard CSV (first column used)</div>
+            <input type="file" id="csvFileInput" accept=".csv,.txt" style="display: none;">
+          </div>
+
+          <!-- Reconciliation Results -->
+          <div id="reconResultsContainer" style="display: none;">
+            <div class="recon-tabs">
+              <button class="btn btn-ghost btn-sm active" id="tabOnboardBtn" onclick="switchReconTab('onboard')">Awaiting Onboarding (<span id="countOnboard">0</span>)</button>
+              <button class="btn btn-ghost btn-sm" id="tabUnlistedBtn" onclick="switchReconTab('unlisted')">Out of Sync / To Pause (<span id="countUnlisted">0</span>)</button>
+            </div>
+
+            <!-- Tab 1: Onboard -->
+            <div id="reconOnboardPanel" class="recon-panel">
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead><tr><th>Name</th><th>Action</th></tr></thead>
+                  <tbody id="reconOnboardTbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Tab 2: To Pause -->
+            <div id="reconUnlistedPanel" class="recon-panel" style="display: none;">
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead><tr><th>Name</th><th>Presence</th><th>Last Active</th><th>Action</th></tr></thead>
+                  <tbody id="reconUnlistedTbody"></tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -421,54 +485,6 @@
       </div>
 
       <!-- ==================== REGISTRATION PAGE ==================== -->
-      <div class="page-view" id="page-roster">
-        <!-- Registration KPIs -->
-        <div class="kpi-strip" id="rosterKpis"></div>
-
-        <!-- v2: Onboarding strip &#8212; devs whose first ping was within the last 14 days -->
-        <div id="onboardingStrip" style="display:none;"></div>
-
-        <!-- Registered Developers (compliance-tracked) -->
-        <div class="card">
-          <div class="card-hd">
-            <div class="card-hd-left">
-              <div class="card-icon ci-green">&#10003;</div>
-              <div>
-                <div class="card-title">Registered Developers</div>
-                <div class="card-subtitle">Active developers tracked for compliance. Automatically added on first ping.</div>
-              </div>
-            </div>
-            <button class="btn btn-ghost btn-sm" onclick="loadRegisteredDevelopers()">&#8635; Reload</button>
-          </div>
-          <div class="manage-add">
-            <input type="text" id="newRegDevName" placeholder="Manually add registered developer"
-                   onkeydown="if(event.key==='Enter')addRegisteredDeveloperManual()">
-            <button class="btn btn-primary btn-sm" onclick="addRegisteredDeveloperManual()">+ Add</button>
-          </div>
-          <div id="registeredDevList"></div>
-        </div>
-
-        <!-- Pending Onboarding (Expected) -->
-        <div class="card">
-          <div class="card-hd">
-            <div class="card-hd-left">
-              <div class="card-icon ci-purple">&#128101;</div>
-              <div>
-                <div class="card-title">Awaiting Onboarding</div>
-                <div class="card-subtitle">Developers expected to register &#8212; auto-removed when they first ping</div>
-              </div>
-            </div>
-            <button class="btn btn-ghost btn-sm" onclick="loadExpectedDevelopers()">&#8635; Reload</button>
-          </div>
-          <div class="manage-add">
-            <input type="text" id="newDevName" placeholder="Full name (e.g. Jane Smith)"
-                   onkeydown="if(event.key==='Enter')addDeveloper()">
-            <button class="btn btn-primary btn-sm" onclick="addDeveloper()">+ Add to Expected</button>
-          </div>
-          <div id="managedDevList"></div>
-        </div>
-      </div>
-
       <!-- ==================== SYSTEM HEALTH PAGE ==================== -->
       <div class="page-view" id="page-health">
         <div class="kpi-strip" id="healthKpis"></div>

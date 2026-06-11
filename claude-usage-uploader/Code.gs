@@ -88,7 +88,8 @@ var STATUS = {
   UPDATED:        'UPDATED'
 };
 
-// Status types considered "noise" — routed to HeartbeatLog instead of ComplianceLog.
+// Status types considered "noise" — v3: these update the developer's
+// RegisteredDevelopers row in-place instead of appending log rows.
 var NOISE_STATUSES = [STATUS.HEARTBEAT, STATUS.WAITING, STATUS.PONG, STATUS.PAUSED, STATUS.WAITING_PAUSED];
 
 // -------------------- ADMIN ACCESS CONTROL (v2) --------------------
@@ -169,15 +170,79 @@ function doGet(e) {
 
 // Runs sheet setup + trigger install only once per script version, not on every page load.
 // Keyed by a version string — bump the value to force a re-run after major schema changes.
-var INIT_VERSION = 'v2';
+var INIT_VERSION = 'v3';
 function maybeRunOneTimeInit_() {
   var props = PropertiesService.getScriptProperties();
   if (props.getProperty('initDone') === INIT_VERSION) return; // already done
-  ensureExpectedDevelopersSheet();
   ensureRegisteredDevelopersSheet();
+  // v3: backfill the new roster activity columns from the legacy log sheets
+  // BEFORE cleanupSheets_ deletes HeartbeatLog/ExpectedDevelopers.
+  try { migrateRosterActivity_(); } catch (e) { log_('v3 migration error: ' + e.toString()); }
   installPruneTrigger();
   cleanupSheets_();
+  invalidateCache_();
   props.setProperty('initDone', INIT_VERSION);
+}
+
+// v3 one-time migration: derive per-developer LastSeen / LastHeartbeat /
+// LastPong / LastUpload / Version / NextPollAt / LastUpdateCheck from the
+// legacy ComplianceLog + HeartbeatLog rows and write them into the roster.
+// Developers seen in the logs but missing from the roster are appended so
+// no one disappears from the dashboard after the cutover.
+function migrateRosterActivity_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ensureRegisteredDevelopersSheet();
+  var userMap = {};
+
+  function scan(sheetName, maxRows) {
+    var s = ss.getSheetByName(sheetName);
+    if (!s) return;
+    var data = getRecentLogRows_(s, maxRows);
+    for (var i = 0; i < data.length; i++) {
+      var row = data[i];
+      if (!row[0] || !row[1]) continue;
+      var ts = row[0];
+      ts = (ts && typeof ts.getTime === 'function') ? ts.toISOString() : String(ts);
+      var name = String(row[1]).trim();
+      if (!name) continue;
+      var status = String(row[3] || '').trim().toUpperCase();
+      var key = name.toLowerCase();
+      if (!userMap[key]) userMap[key] = { name: name, lastSeen: '', lastHeartbeat: '', lastPong: '', lastUpload: '', version: '', nextPollAt: '', lastUpdateCheck: '' };
+      var u = userMap[key];
+      var isNewer = !u.lastSeen || new Date(ts) > new Date(u.lastSeen);
+      if (isNewer) u.lastSeen = ts;
+      if (status === 'HEARTBEAT' || status === 'WAITING' || status === 'POLLING_ACK' || status === 'PAUSED' || status === 'WAITING_PAUSED') {
+        if (!u.lastHeartbeat || new Date(ts) > new Date(u.lastHeartbeat)) u.lastHeartbeat = ts;
+      }
+      if (status === 'PONG' && (!u.lastPong || new Date(ts) > new Date(u.lastPong))) u.lastPong = ts;
+      if (status === 'SUCCESS' && (!u.lastUpload || new Date(ts) > new Date(u.lastUpload))) {
+        u.lastUpload = ts;
+      }
+      if (row[5] && isNewer) u.nextPollAt = String(row[5]).trim();
+      if (row[6] && isNewer) u.version = String(row[6]).trim();
+      if (row[7] && String(row[7]).trim() !== 'never' && isNewer) u.lastUpdateCheck = String(row[7]).trim();
+    }
+  }
+  scan('ComplianceLog', 8000);
+  scan('HeartbeatLog', 2000);
+
+  var data = sheet.getDataRange().getValues();
+  var rowByKey = {};
+  for (var r = 1; r < data.length; r++) {
+    if (data[r][0]) rowByKey[String(data[r][0]).trim().toLowerCase()] = r + 1;
+  }
+  var migrated = 0;
+  Object.keys(userMap).forEach(function(key) {
+    var u = userMap[key];
+    var rowIdx = rowByKey[key];
+    if (!rowIdx) {
+      sheet.appendRow([u.name, u.lastSeen || new Date().toISOString(), u.lastSeen, u.lastHeartbeat, u.lastPong, u.lastUpload, u.version, u.nextPollAt, u.lastUpdateCheck]);
+    } else {
+      sheet.getRange(rowIdx, 3, 1, 7).setValues([[u.lastSeen, u.lastHeartbeat, u.lastPong, u.lastUpload, u.version, u.nextPollAt, u.lastUpdateCheck]]);
+    }
+    migrated++;
+  });
+  log_('v3 migration: backfilled roster activity for ' + migrated + ' developer(s)');
 }
 
 function include(filename) {
@@ -186,10 +251,13 @@ function include(filename) {
 
 // -------------------- SHEET HELPERS --------------------
 
+// v3: HeartbeatLog removed (noise pings now update RegisteredDevelopers
+// in-place) and ExpectedDevelopers removed (roster consolidation — CSV
+// reconciliation on the dashboard replaces the awaiting-onboarding list).
+// cleanupSheets_() deletes both on the v3 one-time init.
 var REQUIRED_SHEETS = [
-  'ComplianceLog', 'HeartbeatLog', 'ExpectedDevelopers',
-  'RegisteredDevelopers', 'PausedDevelopers', 'TriggerQueue',
-  'AppLog', 'Settings'
+  'ComplianceLog', 'RegisteredDevelopers', 'PausedDevelopers',
+  'TriggerQueue', 'AppLog', 'Settings'
 ];
 
 function cleanupSheets_() {
@@ -206,25 +274,29 @@ function cleanupSheets_() {
   if (removed > 0) { log_('Cleanup: removed ' + removed + ' unused sheet(s)'); invalidateCache_(); }
 }
 
+// v3: the roster doubles as the live-activity database. Noise pings
+// (heartbeats etc.) update these columns in-place instead of appending
+// rows to a log sheet — keeps cell count flat regardless of fleet uptime.
+// Columns: 1=Name 2=RegisteredAt 3=LastSeen 4=LastHeartbeat 5=LastPong
+//          6=LastUpload 7=Version 8=NextPollAt 9=LastUpdateCheck
+var REG_SHEET_HEADERS = ['Name', 'RegisteredAt', 'LastSeen', 'LastHeartbeat', 'LastPong', 'LastUpload', 'Version', 'NextPollAt', 'LastUpdateCheck'];
+
 function ensureRegisteredDevelopersSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('RegisteredDevelopers');
   if (!sheet) {
     sheet = ss.insertSheet('RegisteredDevelopers');
-    sheet.appendRow(['Name', 'RegisteredAt']);
-    sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
+    sheet.appendRow(REG_SHEET_HEADERS);
+    sheet.getRange(1, 1, 1, REG_SHEET_HEADERS.length).setFontWeight('bold');
+  } else {
+    var lastCol = sheet.getLastColumn();
+    if (lastCol < REG_SHEET_HEADERS.length) {
+      // Upgrade pre-v3 sheets (Name, RegisteredAt only) in place
+      var missing = REG_SHEET_HEADERS.slice(lastCol);
+      sheet.getRange(1, lastCol + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
+    }
   }
   return sheet;
-}
-
-function ensureExpectedDevelopersSheet() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName('ExpectedDevelopers');
-  if (!sheet) {
-    sheet = ss.insertSheet('ExpectedDevelopers');
-    sheet.appendRow(['Name']);
-    sheet.getRange(1, 1, 1, 1).setFontWeight('bold');
-  }
 }
 
 function ensurePausedDevelopersSheet_() {
@@ -557,8 +629,9 @@ function getDeveloperLogs(name, limit) {
     }
   }
 
+  // v3: ComplianceLog only — heartbeat noise no longer produces log rows
+  // (live presence is shown from the roster instead).
   extractLogs('ComplianceLog');
-  extractLogs('HeartbeatLog');
 
   // Sort by timestamp descending (newest first)
   logs.sort(function(a, b) {
@@ -570,72 +643,24 @@ function getDeveloperLogs(name, limit) {
 
 // -------------------- ACTIVE USERS --------------------
 
-// Derives per-developer activity from ComplianceLog.
-// Returns array of { name, lastSeen, lastHeartbeat, lastUpload, lastPong, pendingTrigger }
+// v3: reads per-developer activity straight from the RegisteredDevelopers
+// roster (kept current in-place by doPost) — no log scanning. One sheet read
+// of N rows replaces the old 2000-row ComplianceLog/HeartbeatLog sweep.
+// Returns array of { name, lastSeen, lastHeartbeat, lastUpload, lastPong, ... }
 function getActiveUsers() {
   requireAdmin_(); // v2: gate behind admin allowlist (soft — no-op in pilot mode)
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var userMap = {};
-  
-  function processSheet(sheetName, boundedRecent) {
-    var sheet = ss.getSheetByName(sheetName);
-    if (!sheet) return;
-    var maxRows = boundedRecent ? 500 : 1500;
-    var data = getRecentLogRows_(sheet, maxRows);
-    for (var i = 0; i < data.length; i++) {
-      var row = data[i];
-      if (!row[0]) continue;
+  ensureRegisteredDevelopersSheet();
+  var sheet = ss.getSheetByName('RegisteredDevelopers');
+  if (!sheet) return [];
+  var data = sheet.getDataRange().getValues();
 
-      var ts = row[0];
-      if (ts && typeof ts.getTime === 'function') ts = ts.toISOString();
-      else ts = String(ts);
-
-      var name = String(row[1]).trim();
-      var status = String(row[3]).trim().toUpperCase();
-
-      if (!name) continue;
-      if (!userMap[name]) userMap[name] = {
-        name: name,
-        lastSeen: null,
-        lastHeartbeat: null,
-        lastUpload: null,
-        lastPong: null,
-        lastSuccessNextPoll: null,
-        version: null,
-        lastUpdateCheck: null
-      };
-
-      var u = userMap[name];
-      var isNewer = !u.lastSeen || new Date(ts) > new Date(u.lastSeen);
-      if (isNewer) u.lastSeen = ts;
-
-      if (status === 'HEARTBEAT' || status === 'WAITING' || status === 'POLLING_ACK' || status === 'PAUSED' || status === 'WAITING_PAUSED') {
-        if (!u.lastHeartbeat || new Date(ts) > new Date(u.lastHeartbeat)) u.lastHeartbeat = ts;
-      }
-      if (status === 'SUCCESS') {
-        if (!u.lastUpload || new Date(ts) > new Date(u.lastUpload)) {
-          u.lastUpload = ts;
-          u.lastSuccessNextPoll = row[5] ? String(row[5]).trim() : ''; // For summary dashboard
-        }
-      }
-      if (status === 'PONG') {
-        if (!u.lastPong || new Date(ts) > new Date(u.lastPong)) u.lastPong = ts;
-      }
-
-      // Track version and last update check (columns 7 and 8)
-      var rowVersion = row[6] ? String(row[6]).trim() : '';
-      var rowUpdateCheck = row[7] ? String(row[7]).trim() : '';
-      if (rowVersion && (!u.version || isNewer)) {
-        u.version = rowVersion;
-      }
-      if (rowUpdateCheck && rowUpdateCheck !== 'never' && (!u.lastUpdateCheck || isNewer)) {
-        u.lastUpdateCheck = rowUpdateCheck;
-      }
-    }
+  function isoStr(v) {
+    if (!v) return null;
+    if (typeof v.getTime === 'function') return v.toISOString();
+    var s = String(v).trim();
+    return s || null;
   }
-
-  processSheet('ComplianceLog', false);
-  processSheet('HeartbeatLog', true);
 
   // Enrich with pending trigger info
   var triggerMap = {};
@@ -655,15 +680,29 @@ function getActiveUsers() {
   // Check paused state for all users
   var pausedMap = getPausedDevelopersMap_();
 
-  return Object.values(userMap).map(function(u) {
-    var key = u.name.toLowerCase();
-    u.pendingTrigger = !!(triggerMap[key] && triggerMap[key]['FORCE_RUN']);
-    u.pendingPing    = !!(triggerMap[key] && triggerMap[key]['PING']);
-    u.paused         = !!pausedMap[key];
-    u.pausedAt       = pausedMap[key] ? pausedMap[key].pausedAt : null;
-    u.pausedBy       = pausedMap[key] ? pausedMap[key].pausedBy : null;
-    return u;
-  }).sort(function(a, b) {
+  var users = [];
+  for (var i = 1; i < data.length; i++) {
+    var name = String(data[i][0] || '').trim();
+    if (!name) continue;
+    var key = name.toLowerCase();
+    users.push({
+      name: name,
+      registeredAt:        isoStr(data[i][1]),
+      lastSeen:            isoStr(data[i][2]),
+      lastHeartbeat:       isoStr(data[i][3]),
+      lastPong:            isoStr(data[i][4]),
+      lastUpload:          isoStr(data[i][5]),
+      version:             data[i][6] ? String(data[i][6]).trim() : null,
+      lastSuccessNextPoll: isoStr(data[i][7]),  // NextPollAt — feeds the Upload Summary "Next Up" cell
+      lastUpdateCheck:     data[i][8] ? String(data[i][8]).trim() : null,
+      pendingTrigger: !!(triggerMap[key] && triggerMap[key]['FORCE_RUN']),
+      pendingPing:    !!(triggerMap[key] && triggerMap[key]['PING']),
+      paused:         !!pausedMap[key],
+      pausedAt:       pausedMap[key] ? pausedMap[key].pausedAt : null,
+      pausedBy:       pausedMap[key] ? pausedMap[key].pausedBy : null
+    });
+  }
+  return users.sort(function(a, b) {
     if (!a.lastSeen) return 1;
     if (!b.lastSeen) return -1;
     return new Date(b.lastSeen) - new Date(a.lastSeen);
@@ -878,15 +917,7 @@ function getDashboardData() {
 function getDashboardData_uncached_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  // 1. Expected Developers (pending onboarding — haven't registered yet)
-  var expectedSheet = ss.getSheetByName('ExpectedDevelopers');
-  var expectedData = expectedSheet ? expectedSheet.getDataRange().getValues() : [];
-  var expectedDevelopers = [];
-  for (var i = 1; i < expectedData.length; i++) {
-    if (expectedData[i][0]) expectedDevelopers.push(String(expectedData[i][0]).trim());
-  }
-
-  // 1b. Registered Developers (active — compliance is tracked against this list)
+  // 1. Registered Developers (active — compliance is tracked against this list)
   ensureRegisteredDevelopersSheet();
   var regSheet_ = ss.getSheetByName('RegisteredDevelopers');
   var regData_ = regSheet_ ? regSheet_.getDataRange().getValues() : [];
@@ -1057,7 +1088,8 @@ function getDashboardData_uncached_() {
       else if (tstatus === 'FAILURE' || tstatus === 'ERROR') trendSet[twk].failureByName[tname] = true;
     }
   }
-  var expectedRosterSize = (expectedDevelopers || []).length + (registeredDevelopers || []).length;
+  // v3: roster size = registered developers (Expected list removed)
+  var expectedRosterSize = (registeredDevelopers || []).length;
   var complianceTrend = trendWeeks.map(function(w) {
     var bucket = trendSet[w];
     var compliant = Object.keys(bucket.successByName).length;
@@ -1072,7 +1104,6 @@ function getDashboardData_uncached_() {
     methodologyVersion: 'v2.0',
     schemaVersion: SHEET_SCHEMA_VERSION,
     latestVersion: getLatestVersion(),
-    expectedDevelopers: expectedDevelopers,
     registeredDevelopers: registeredDevelopers,
     weeks: weeks,
     complianceByWeek: complianceByWeek,
@@ -1462,6 +1493,50 @@ function maybeQueueDailyAutoGenerate_(name) {
 
 // -------------------- WEBHOOK (POST) --------------------
 
+// v3: single write path for live developer activity. Locates (or registers)
+// the developer's row in RegisteredDevelopers and updates the activity
+// columns (3–9) with ONE setValues call. Returns nothing; errors propagate
+// to doPost's catch. Concurrency note: Sheets cell writes are atomic and
+// each developer only ever touches their own row, so no ScriptLock is taken
+// (a lock here would starve getDashboardData, same rationale as doPost).
+function upsertRosterActivity_(name, status, version, nextPollAt, lastUpdateCheck) {
+  var sheet = ensureRegisteredDevelopersSheet();
+  var data = sheet.getDataRange().getValues();
+  var nameLower = name.trim().toLowerCase();
+  var rowIdx = -1;
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][0]).trim().toLowerCase() === nameLower) { rowIdx = r + 1; break; }
+  }
+
+  var nowIso = new Date().toISOString();
+  if (rowIdx === -1) {
+    // First ping — auto-register
+    sheet.appendRow([name.trim(), nowIso, nowIso, '', '', '', version || '', nextPollAt || '', lastUpdateCheck || '']);
+    log_('Registered new developer: ' + name);
+    invalidateCache_(); // roster mutation — full flush
+    return;
+  }
+
+  // Existing row: merge updates into current values, write cols 3–9 in one call
+  var cur = data[rowIdx - 1]; // 0-based row from the same read
+  var vals = [
+    nowIso,                                                   // 3 LastSeen
+    cur[3] ? String(cur[3]) : '',                             // 4 LastHeartbeat
+    cur[4] ? String(cur[4]) : '',                             // 5 LastPong
+    cur[5] ? String(cur[5]) : '',                             // 6 LastUpload
+    version ? String(version) : (cur[6] ? String(cur[6]) : ''), // 7 Version
+    nextPollAt ? String(nextPollAt) : (cur[7] ? String(cur[7]) : ''), // 8 NextPollAt
+    (lastUpdateCheck && lastUpdateCheck !== 'never') ? String(lastUpdateCheck) : (cur[8] ? String(cur[8]) : '') // 9 LastUpdateCheck
+  ];
+  if (status === STATUS.HEARTBEAT || status === STATUS.WAITING || status === STATUS.POLLING_ACK ||
+      status === STATUS.PAUSED || status === STATUS.WAITING_PAUSED) {
+    vals[1] = nowIso; // LastHeartbeat
+  }
+  if (status === STATUS.PONG)    vals[2] = nowIso; // LastPong
+  if (status === STATUS.SUCCESS) vals[3] = nowIso; // LastUpload
+  sheet.getRange(rowIdx, 3, 1, 7).setValues([vals]);
+}
+
 function doPost(e) {
   var sigErr = verifyWebhookSignature_(e);
   if (sigErr) {
@@ -1494,72 +1569,46 @@ function doPost(e) {
 
     var ss    = SpreadsheetApp.getActiveSpreadsheet();
 
-    // On first ping: add to RegisteredDevelopers; remove from ExpectedDevelopers if present.
-    if (name && name !== 'UNKNOWN') {
-      var cache = CacheService.getScriptCache();
-      var regCacheKey = 'regDevs_' + name.trim().toLowerCase();
-      var alreadyRegistered = cache.get(regCacheKey);
-      
-      if (!alreadyRegistered) {
-        var regSheet = ensureRegisteredDevelopersSheet();
-        var regData = regSheet.getDataRange().getValues();
-        for (var ri = 1; ri < regData.length; ri++) {
-          if (String(regData[ri][0]).trim().toLowerCase() === name.trim().toLowerCase()) { alreadyRegistered = true; break; }
-        }
-        if (alreadyRegistered) {
-          cache.put(regCacheKey, 'true', 3600);
-        } else {
-          regSheet.appendRow([name.trim(), new Date().toISOString()]);
-          cache.put(regCacheKey, 'true', 3600);
-          log_('Registered new developer: ' + name);
-          // Remove from ExpectedDevelopers if present
-          var expSheet2 = ss.getSheetByName('ExpectedDevelopers');
-          if (expSheet2) {
-            var expData2 = expSheet2.getDataRange().getValues();
-            for (var ei2 = expData2.length - 1; ei2 >= 1; ei2--) {
-              if (String(expData2[ei2][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
-                expSheet2.deleteRow(ei2 + 1);
-                log_('Moved ' + name + ' from Expected to Registered');
-                break;
-              }
-            }
-          }
-          // Roster mutation — needs full invalidation
-          invalidateCache_();
-        }
-      }
-    }
-
     var isNoise = NOISE_STATUSES.indexOf(status) !== -1;
-    var sheetName = isNoise ? 'HeartbeatLog' : 'ComplianceLog';
-    var sheet = ss.getSheetByName(sheetName);
-    
-    if (!sheet) {
-      sheet = ss.insertSheet(sheetName);
-      sheet.appendRow(['Timestamp', 'Developer Name', 'Week Start Date', 'Status', 'Error Message', 'NextPollAt', 'Version', 'LastUpdateCheck']);
-      sheet.getRange(1, 1, 1, 8).setFontWeight('bold');
-    } else {
-      var cache = CacheService.getScriptCache();
-      var upgradeCacheKey = 'sheetUpgraded_' + sheetName;
-      var upgraded = cache.get(upgradeCacheKey);
-      if (!upgraded) {
-        var lastCol = sheet.getLastColumn();
-        if (lastCol < 6) { sheet.getRange(1, 6).setValue('NextPollAt').setFontWeight('bold'); }
-        if (lastCol < 7) { sheet.getRange(1, 7).setValue('Version').setFontWeight('bold'); }
-        if (lastCol < 8) { sheet.getRange(1, 8).setValue('LastUpdateCheck').setFontWeight('bold'); }
-        cache.put(upgradeCacheKey, 'true', 21600);
+
+    // v3: noise pings (heartbeats, pause/idle pings, pongs) no longer append
+    // log rows. They update the developer's RegisteredDevelopers row in-place,
+    // which keeps the spreadsheet cell count flat. Repetitive keep-alive
+    // statuses are throttled to one roster write per developer per 60s —
+    // PONG is exempt because it answers an explicit admin Ping test and a
+    // dropped PONG would read as "no response" on the dashboard.
+    if (name && name !== 'UNKNOWN') {
+      var throttleActive = false;
+      if (isNoise && status !== STATUS.PONG) {
+        var cache = CacheService.getScriptCache();
+        var throttleKey = 'hb_throttle_' + name.trim().toLowerCase();
+        if (cache.get(throttleKey)) {
+          throttleActive = true;
+        } else {
+          cache.put(throttleKey, 'true', 60);
+        }
+      }
+      if (!throttleActive) {
+        upsertRosterActivity_(name, status, version, nextPollAt, lastUpdateCheck);
       }
     }
 
-    var weekStart = getCurrentWeekStart_();
-
-    sheet.appendRow([new Date(), name, weekStart, status, message, nextPollAt, version, lastUpdateCheck]);
-    // v2: only flush the heavy caches for non-noise events; noise events bump
-    // lastModified only so the dashboard's freshness pill still updates, while
-    // triggerQueueRows / pausedSet caches survive heartbeat storms.
     if (!isNoise) {
+      // Lifecycle + terminal events still append to ComplianceLog — the Queue
+      // page (in-progress detection), progress rows, Smart Retry, compliance
+      // grid and CSV export all derive from these rows.
+      var sheet = ss.getSheetByName('ComplianceLog');
+      if (!sheet) {
+        sheet = ss.insertSheet('ComplianceLog');
+        sheet.appendRow(['Timestamp', 'Developer Name', 'Week Start Date', 'Status', 'Error Message', 'NextPollAt', 'Version', 'LastUpdateCheck']);
+        sheet.getRange(1, 1, 1, 8).setFontWeight('bold');
+      }
+      var weekStart = getCurrentWeekStart_();
+      sheet.appendRow([new Date(), name, weekStart, status, message, nextPollAt, version, lastUpdateCheck]);
       bumpLastModified_();
     } else {
+      // Noise events only refresh the lastModified pill — flushing the heavy
+      // dashboardData cache here would force a full rebuild on every heartbeat.
       try { CacheService.getScriptCache().put('lastModified', String(Date.now()), 3600); } catch (_) {}
     }
 
@@ -1595,7 +1644,7 @@ function simulatePing(name, status, message) {
   requireAdmin_();
   var body = JSON.stringify({ name: name, status: status, message: message });
   var ts   = Math.floor(Date.now() / 1000).toString();
-  var sig  = computeHmac256_(WEBHOOK_HMAC_SECRET, ts + '.' + body);
+  var sig  = computeHmac256_(getWebhookSecret_(), ts + '.' + body);
   var e = {
     postData:  { contents: body },
     parameter: { _ts: ts, _sig: sig }
@@ -1639,17 +1688,18 @@ function getDeveloperProgressStatus(name) {
 
   var recentLogs = getDeveloperLogs(name, 15);
 
-  // Find the most recent nextPollAt stamp — scan only recent HeartbeatLog rows
+  // v3: nextPollAt comes from the roster's NextPollAt column (kept fresh by
+  // doPost on every ping that carries one) — HeartbeatLog no longer exists.
   var lastNextPollAt = '';
-  var hbSheet = ss.getSheetByName('HeartbeatLog');
-  if (hbSheet) {
-    var hbRows = getRecentLogRows_(hbSheet, 200);
-    for (var j = hbRows.length - 1; j >= 0; j--) {
-      var rowStatus = String(hbRows[j][3]).trim().toUpperCase();
-      if ((rowStatus === 'WAITING' || rowStatus === 'POLLING_ACK' || rowStatus === 'PONG')
-          && String(hbRows[j][1]).trim().toLowerCase() === nameLower) {
-        var np = hbRows[j][5] ? String(hbRows[j][5]).trim() : '';
-        if (np) { lastNextPollAt = np; break; }
+  var regSheet = ss.getSheetByName('RegisteredDevelopers');
+  if (regSheet) {
+    var regData = regSheet.getDataRange().getValues();
+    for (var j = 1; j < regData.length; j++) {
+      if (String(regData[j][0]).trim().toLowerCase() === nameLower) {
+        var np = regData[j][7];
+        if (np && typeof np.getTime === 'function') np = np.toISOString();
+        lastNextPollAt = np ? String(np).trim() : '';
+        break;
       }
     }
   }
@@ -1680,22 +1730,21 @@ function getDeveloperProgressStatusBatch(names) {
     }
   }
 
-  // 2. Read HeartbeatLog ONCE — find last nextPollAt per developer.
+  // 2. Read the roster ONCE — NextPollAt column (col 8) per developer.
   var nextPollMap = {};
-  var hbSheet = ss.getSheetByName('HeartbeatLog');
-  if (hbSheet) {
-    var hbRows = getRecentLogRows_(hbSheet, 300);
-    for (var j = hbRows.length - 1; j >= 0; j--) {
-      var hbName = String(hbRows[j][1] || '').trim().toLowerCase();
-      if (!nameLowerMap[hbName] || nextPollMap[hbName]) continue;
-      var hbStatus = String(hbRows[j][3] || '').trim().toUpperCase();
-      if ((hbStatus === 'WAITING' || hbStatus === 'POLLING_ACK' || hbStatus === 'PONG') && hbRows[j][5]) {
-        nextPollMap[hbName] = String(hbRows[j][5]).trim();
-      }
+  var regSheet = ss.getSheetByName('RegisteredDevelopers');
+  if (regSheet) {
+    var regRows = regSheet.getDataRange().getValues();
+    for (var j = 1; j < regRows.length; j++) {
+      var rName = String(regRows[j][0] || '').trim().toLowerCase();
+      if (!nameLowerMap[rName]) continue;
+      var np = regRows[j][7];
+      if (np && typeof np.getTime === 'function') np = np.toISOString();
+      if (np) nextPollMap[rName] = String(np).trim();
     }
   }
 
-  // 3. Read ComplianceLog + HeartbeatLog ONCE each — collect logs for all names.
+  // 3. Read ComplianceLog ONCE — collect logs for all names.
   var recentLogsMap = {};
   names.forEach(function(n) { recentLogsMap[n.trim().toLowerCase()] = []; });
 
@@ -1718,7 +1767,6 @@ function getDeveloperProgressStatusBatch(names) {
     }
   }
   collectLogs('ComplianceLog');
-  collectLogs('HeartbeatLog');
 
   // 4. Sort each developer's logs and build the result object.
   var result = {};
@@ -1795,103 +1843,11 @@ function getInProgressRuns_(ss, excludeNames) {
   return result;
 }
 
-// -------------------- EXPECTED DEVELOPERS MANAGEMENT --------------------
-
-function getExpectedDevelopersList() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  ensureExpectedDevelopersSheet();
-  var sheet = ss.getSheetByName('ExpectedDevelopers');
-  var data = sheet.getDataRange().getValues();
-  var result = [];
-  for (var i = 1; i < data.length; i++) {
-    if (data[i][0]) result.push(String(data[i][0]).trim());
-  }
-  return result;
-}
-
-function addExpectedDeveloper(name) {
-  requireAdmin_();
-  if (!name || !name.trim()) return { success: false, error: 'Name is required' };
-  name = name.trim();
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    ensureExpectedDevelopersSheet();
-    var sheet = ss.getSheetByName('ExpectedDevelopers');
-    var data = sheet.getDataRange().getValues();
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][0]).trim().toLowerCase() === name.toLowerCase()) {
-        return { success: false, error: name + ' is already in the list' };
-      }
-    }
-    sheet.appendRow([name]);
-    invalidateCache_();
-    return { success: true };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function removeExpectedDeveloper(name) {
-  requireAdmin_();
-  if (!name) return { success: false, error: 'Name is required' };
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName('ExpectedDevelopers');
-    if (!sheet) return { success: false, error: 'Sheet not found' };
-    var data = sheet.getDataRange().getValues();
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
-        sheet.deleteRow(i + 1);
-        invalidateCache_();
-        return { success: true };
-      }
-    }
-    return { success: false, error: name + ' not found' };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// Bulk-add all active developers (anyone who has ever sent a ping) to ExpectedDevelopers.
-// Useful for seeding the roster from historical log data. Returns { added: [] }.
-function adminSyncActiveToExpected() {
-  requireAdmin_();
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    ensureExpectedDevelopersSheet();
-    var expSheet = ss.getSheetByName('ExpectedDevelopers');
-    var expData = expSheet.getDataRange().getValues();
-    var existing = {};
-    for (var i = 1; i < expData.length; i++) {
-      if (expData[i][0]) existing[String(expData[i][0]).trim().toLowerCase()] = true;
-    }
-    var added = [];
-    getActiveUsers().forEach(function(u) {
-      if (!u.name) return;
-      var key = u.name.trim().toLowerCase();
-      if (!existing[key]) {
-        expSheet.appendRow([u.name.trim()]);
-        existing[key] = true;
-        added.push(u.name.trim());
-      }
-    });
-    if (added.length > 0) {
-      log_('adminSyncActiveToExpected: added ' + added.length + ' developer(s): ' + added.join(', '));
-      invalidateCache_();
-    }
-    return { added: added };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
 // -------------------- REGISTERED DEVELOPERS MANAGEMENT --------------------
+// v3: the ExpectedDevelopers list (and its CRUD endpoints) was removed.
+// Onboarding gaps are now surfaced by the dashboard's CSV Roster
+// Reconciliation card, which compares an uploaded HR roster against
+// RegisteredDevelopers client-side.
 
 function getRegisteredDevelopersList() {
   requireAdmin_();
@@ -1908,22 +1864,40 @@ function removeRegisteredDeveloper(name) {
   if (!name) return { success: false, error: 'Name is required' };
   var lock = LockService.getScriptLock();
   lock.waitLock(10000);
+  var found = false;
   try {
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('RegisteredDevelopers');
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName('RegisteredDevelopers');
     if (!sheet) return { success: false, error: 'Sheet not found' };
     var data = sheet.getDataRange().getValues();
     for (var i = 1; i < data.length; i++) {
       if (String(data[i][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
         sheet.deleteRow(i + 1);
-        invalidateCache_();
-        log_('Removed registered developer: ' + name);
-        return { success: true };
+        found = true;
+        break;
       }
     }
-    return { success: false, error: name + ' not found in RegisteredDevelopers' };
+    if (!found) return { success: false, error: name + ' not found in RegisteredDevelopers' };
+
+    // v3: a deleted developer must not linger in PausedDevelopers
+    var pausedSheet = ss.getSheetByName('PausedDevelopers');
+    if (pausedSheet) {
+      var pData = pausedSheet.getDataRange().getValues();
+      for (var pIdx = 1; pIdx < pData.length; pIdx++) {
+        if (String(pData[pIdx][0]).trim().toLowerCase() === name.trim().toLowerCase()) {
+          pausedSheet.deleteRow(pIdx + 1);
+          break;
+        }
+      }
+    }
+    invalidateCache_();
+    log_('Removed registered developer: ' + name);
   } finally {
     lock.releaseLock();
   }
+  // v3: outside the lock — trash their report files in the shared folder
+  var deleted = deleteUploaderDriveFiles_(name);
+  return { success: true, driveFilesDeleted: deleted };
 }
 
 function addRegisteredDeveloper(name) {
@@ -1960,25 +1934,21 @@ function log_(msg) {
   }
 }
 
+// v3: HeartbeatLog no longer exists (noise pings update the roster
+// in-place). Function name retained because the daily time-based trigger
+// is installed against 'pruneHeartbeatLog' and survives redeploys.
 function pruneHeartbeatLog() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) return;
   try {
-    // 1. HeartbeatLog: max 2000 rows
-    fastPruneLogSheet_(
-      'HeartbeatLog',
-      2000,
-      ['Timestamp', 'Developer Name', 'Week Start Date', 'Status', 'Error Message', 'NextPollAt', 'Version', 'LastUpdateCheck']
-    );
-    
-    // 2. AppLog: max 1000 rows
+    // 1. AppLog: max 1000 rows
     fastPruneLogSheet_(
       'AppLog',
       1000,
       ['Timestamp', 'Message']
     );
-    
-    // 3. ComplianceLog: max 5000 rows
+
+    // 2. ComplianceLog: max 5000 rows
     fastPruneLogSheet_(
       'ComplianceLog',
       5000,
@@ -2044,10 +2014,7 @@ function adminForcePrune() {
       }
       
       // Prune rows if it's a log sheet
-      if (name === 'HeartbeatLog') {
-        var lr = s.getLastRow();
-        if (lr > 2000) s.deleteRows(2, lr - 2000);
-      } else if (name === 'AppLog') {
+      if (name === 'AppLog') {
         var lr = s.getLastRow();
         if (lr > 1000) s.deleteRows(2, lr - 1000);
       } else if (name === 'ComplianceLog') {
@@ -2104,6 +2071,8 @@ function setStallThresholdHours(hours) {
 function runStallScan() {
   // Designed to be called both manually and from a time-driven trigger.
   // Public (no requireAdmin_) so the scheduler can run it.
+  // v3: piggyback the hourly Drive sweep for paused developers' files.
+  cleanupPausedDevelopersFiles();
   var threshold = getStallThresholdHours_();
   var thresholdMs = threshold * 3600 * 1000;
   var now = Date.now();
@@ -2321,6 +2290,75 @@ function sendComplianceReminders(force) {
   return { success: true, message: 'Reminder sent to ' + adminEmail + ' for ' + nonCompliant.length + ' non-compliant developer(s).' };
 }
 
+// -------------------- DRIVE FILE CLEANUP (v3) --------------------
+// Uploaders write <Name_with_underscores>_claude_daily.json and
+// _claude_session.json into this shared Drive folder (same ID as the
+// uploader's DRIVE_FOLDER_ID). Pausing or deleting a developer trashes
+// their files; an hourly sweep inside runStallScan() catches anything a
+// paused uploader managed to re-upload before it saw paused=true.
+// NOTE: the script's executing account needs Content Manager (or higher)
+// on the shared drive — failures are logged, never thrown.
+var SHARED_DRIVE_FOLDER_ID = '0AMXBcPT9R10cUk9PVA';
+
+function uploaderFileNamesFor_(name) {
+  var prefix = String(name || '').trim().replace(/\s+/g, '_');
+  return [prefix + '_claude_daily.json', prefix + '_claude_session.json'];
+}
+
+function deleteUploaderDriveFiles_(name) {
+  if (!name) return 0;
+  var deletedCount = 0;
+  try {
+    var wanted = {};
+    uploaderFileNamesFor_(name).forEach(function(f) { wanted[f] = true; });
+    var folder = DriveApp.getFolderById(SHARED_DRIVE_FOLDER_ID);
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+      var file = files.next();
+      if (file.isTrashed()) continue;
+      if (wanted[file.getName()]) {
+        file.setTrashed(true);
+        deletedCount++;
+      }
+    }
+    log_('DriveApp: deleted ' + deletedCount + ' file(s) for ' + name);
+  } catch (e) {
+    log_('DriveApp: error deleting files for ' + name + ': ' + e.toString());
+  }
+  return deletedCount;
+}
+
+// Hourly sweep (called from runStallScan): trash report files belonging to
+// any currently-paused developer. Single folder iteration for all names.
+function cleanupPausedDevelopersFiles() {
+  try {
+    var paused = getPausedDevelopersList();
+    if (paused.length === 0) return;
+
+    var wanted = {};
+    paused.forEach(function(p) {
+      uploaderFileNamesFor_(p.name).forEach(function(f) { wanted[f] = true; });
+    });
+
+    var folder = DriveApp.getFolderById(SHARED_DRIVE_FOLDER_ID);
+    var files = folder.getFiles();
+    var deletedCount = 0;
+    while (files.hasNext()) {
+      var file = files.next();
+      if (file.isTrashed()) continue;
+      if (wanted[file.getName()]) {
+        file.setTrashed(true);
+        deletedCount++;
+      }
+    }
+    if (deletedCount > 0) {
+      log_('DriveApp: auto-cleanup trashed ' + deletedCount + ' file(s) for paused developers');
+    }
+  } catch (e) {
+    log_('DriveApp: auto-cleanup failed: ' + e.toString());
+  }
+}
+
 // -------------------- PAUSE / RESUME --------------------
 
 function isDeveloperPaused_(ss, name) {
@@ -2396,10 +2434,13 @@ function adminPauseDeveloper(name) {
     sheet.appendRow([name, new Date().toISOString(), who]);
     log_('PausedDevelopers: paused ' + name + ' by ' + who);
     invalidateCache_();
-    return { success: true };
   } finally {
     lock.releaseLock();
   }
+  // v3: outside the lock — Drive iteration is slow and must not starve
+  // other executions waiting on the script lock.
+  var deleted = deleteUploaderDriveFiles_(name);
+  return { success: true, driveFilesDeleted: deleted };
 }
 
 function adminResumeDeveloper(name) {
@@ -2431,7 +2472,7 @@ function adminResumeDeveloper(name) {
 // v2: schema version this code expects. Bump when ComplianceLog / HeartbeatLog
 // / TriggerQueue / RegisteredDevelopers columns are added or changed. The
 // `getSchemaInfo` endpoint surfaces this on the Health page.
-var SHEET_SCHEMA_VERSION = 'v2.0';
+var SHEET_SCHEMA_VERSION = 'v3.0';
 
 function ensureSettingsSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();

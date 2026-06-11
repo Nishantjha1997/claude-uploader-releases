@@ -278,7 +278,26 @@ body {
 .data-table tbody tr:hover{background:rgba(255,255,255,.035)}
 .data-table tbody tr:last-child td{border-bottom:none}
 .clickable-row{cursor:pointer}
-.table-wrap{overflow-x:auto;overflow-y:auto;max-height:68vh;-webkit-overflow-scrolling:touch}
+/* v3: unified scroll container — same capped height on every dashboard table,
+   framed so the scroll boundary is visible. Sticky thead + thin themed
+   scrollbars are defined globally above. */
+.table-wrap{overflow-x:auto;overflow-y:auto;max-height:480px;-webkit-overflow-scrolling:touch;
+  border:1px solid var(--glass-b);border-radius:var(--rx);background:rgba(15,23,42,.2);
+  scrollbar-width:thin;scrollbar-color:rgba(0,209,255,.3) var(--bg2)}
+.table-wrap::-webkit-scrollbar{width:6px;height:6px}
+.table-wrap::-webkit-scrollbar-track{background:var(--bg2);border-radius:var(--rx)}
+.table-wrap::-webkit-scrollbar-thumb{background:rgba(0,209,255,.38);border-radius:4px}
+.table-wrap::-webkit-scrollbar-thumb:hover{background:var(--t3)}
+
+/* v3: CSV reconciliation upload zone */
+.upload-zone{border:2px dashed var(--glass-b);border-radius:var(--rx);padding:30px;
+  text-align:center;cursor:pointer;transition:all .3s;margin-bottom:20px;background:var(--glass)}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--indigo);background:var(--glass-hv);
+  box-shadow:var(--glow-indigo)}
+
+/* v3: reconciliation result tabs */
+.recon-tabs{display:flex;gap:10px;margin-bottom:15px;border-bottom:1px solid var(--glass-b);padding-bottom:8px}
+.recon-tabs .btn.active{border-color:var(--indigo);color:var(--t1);background:var(--glass-hv)}
 
 /* BADGE */
 .badge{display:inline-flex;align-items:center;gap:4px;padding:4px 11px;border-radius:999px;

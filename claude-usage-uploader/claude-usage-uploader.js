@@ -38,11 +38,11 @@ const IS_LINUX = process.platform === 'linux';
 const PLATFORM_KEY = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
 
 // -------------------- CONFIGURATION --------------------
-const VERSION = '2.0.2';
+const VERSION = '2.0.3';
 const FORCE_RUN = process.argv.includes('--force');
 
 // -------------------- SERVICE LOOP INTERVALS --------------------
-const POLL_INTERVAL_MS      =  5  * 1000;         // poll for admin triggers every 5s
+const POLL_INTERVAL_MS      = 60  * 1000;         // poll for admin triggers every 60s (v2.1: was 5s — cuts GAS doGet executions ~91.6%)
 const HEARTBEAT_INTERVAL_MS =  5  * 60 * 1000;    // heartbeat every 5 minutes
 const UPLOAD_CHECK_MS       = 60  * 60 * 1000;    // check if upload due every hour
 const UPDATE_CHECK_MS       = 24  * 60 * 60 * 1000; // check for updates every 24h
@@ -1543,7 +1543,7 @@ function acquireSingleInstanceLock() {
 
 // -------------------- SERVICE LOOP --------------------
 // The tool runs as a persistent background process. It never exits under normal conditions.
-// - Polls GAS every 30s for admin triggers (PING or FORCE_RUN)
+// - Polls GAS every 60s for admin triggers (PING or FORCE_RUN)
 // - Sends a heartbeat every 5 minutes so the dashboard shows online status
 // - Checks once per hour if a scheduled weekly upload is due
 // - Checks once per day for a new version
