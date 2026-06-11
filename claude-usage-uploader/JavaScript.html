@@ -207,9 +207,7 @@ function updateDashboardInPlace() {
   renderCompliancePage();
   renderHealthKpis();
   renderVersionMatrix();
-  if (currentPage === 'overview' || currentPage === 'compliance') {
-    try { renderComplianceTrendChart(); } catch (e) {}
-  }
+
   // Refresh any expanded progress rows with the new data
   var expanded = Object.keys(expandState).filter(function(n) { return expandState[n]; });
   if (expanded.length > 0) fetchProgressBatch(expanded);
@@ -1999,60 +1997,6 @@ function toggleMobileSidebar() {
   if (sb) sb.classList.toggle('mobile-open');
 }
 
-// v2: 12-week compliance trend chart \u2014 stacked bars per week (compliant /
-// failed / missing) so admins see directional change at a glance.
-function renderComplianceTrendChart() {
-  var container = document.getElementById('complianceTrendChart');
-  if (!container || !dashboardData) return;
-  var trend = dashboardData.complianceTrend || [];
-  if (trend.length === 0) {
-    container.innerHTML = '<div class="empty-state">No trend data available.</div>';
-    return;
-  }
-  var W = container.clientWidth || 720;
-  var H = 220;
-  var pad = { l: 40, r: 16, t: 18, b: 36 };
-  var innerW = W - pad.l - pad.r;
-  var innerH = H - pad.t - pad.b;
-  var barW = Math.max(8, (innerW / trend.length) * 0.65);
-  var step = innerW / trend.length;
-  var maxStack = 0;
-  trend.forEach(function(t) { var s = t.compliant + t.failed + t.missing; if (s > maxStack) maxStack = s; });
-  if (maxStack === 0) maxStack = 1;
-  function y(v) { return pad.t + innerH - (v / maxStack) * innerH; }
-  var bars = trend.map(function(t, i) {
-    var x = pad.l + step * i + (step - barW) / 2;
-    var cH = (t.compliant / maxStack) * innerH;
-    var fH = (t.failed    / maxStack) * innerH;
-    var mH = (t.missing   / maxStack) * innerH;
-    var yTop = pad.t + innerH - cH - fH - mH;
-    var label = String(t.week || '').substring(5); // MM-DD only
-    return (
-      '<g><title>' + esc(t.week) + ': ' + t.compliant + ' compliant / ' + t.failed + ' failed / ' + t.missing + ' missing</title>' +
-      '<rect x="' + x + '" y="' + yTop + '" width="' + barW + '" height="' + cH + '" fill="var(--green,#10b981)" opacity="0.85"/>' +
-      '<rect x="' + x + '" y="' + (yTop + cH) + '" width="' + barW + '" height="' + fH + '" fill="var(--red,#ef4444)" opacity="0.85"/>' +
-      '<rect x="' + x + '" y="' + (yTop + cH + fH) + '" width="' + barW + '" height="' + mH + '" fill="var(--amber,#f59e0b)" opacity="0.7"/>' +
-      '<text x="' + (x + barW / 2) + '" y="' + (H - 14) + '" text-anchor="middle" font-size="9" fill="var(--muted,#94a3b8)">' + esc(label) + '</text>' +
-      '</g>'
-    );
-  }).join('');
-  // y gridlines
-  var gridY = '';
-  for (var g = 0; g <= 4; g++) {
-    var yy = pad.t + (innerH * g / 4);
-    var v = Math.round(maxStack * (1 - g / 4));
-    gridY += '<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (pad.l + innerW) + '" y2="' + yy + '" stroke="rgba(255,255,255,0.05)"/>' +
-             '<text x="' + (pad.l - 6) + '" y="' + (yy + 4) + '" text-anchor="end" font-size="9" fill="var(--muted,#94a3b8)">' + v + '</text>';
-  }
-  // Legend
-  var legend = '<g transform="translate(' + (pad.l) + ',' + (pad.t - 6) + ')">' +
-    '<rect width="9" height="9" y="-7" fill="var(--green,#10b981)"/><text x="14" y="1" font-size="10" fill="var(--text,#e2e8f0)">Compliant</text>' +
-    '<rect x="80" width="9" height="9" y="-7" fill="var(--red,#ef4444)"/><text x="94" y="1" font-size="10" fill="var(--text,#e2e8f0)">Failed</text>' +
-    '<rect x="150" width="9" height="9" y="-7" fill="var(--amber,#f59e0b)"/><text x="164" y="1" font-size="10" fill="var(--text,#e2e8f0)">Missing</text>' +
-    '</g>';
-  container.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="' + H + '">' + gridY + bars + legend + '</svg>';
-}
-
 // v2: Onboarding strip (registered devs whose first ping was within the last
 // 14 days). Surfaces new hires so they're not mistaken for stalled devs.
 function renderOnboardingStrip() {
@@ -2412,10 +2356,6 @@ initCsvUpload();
     // After existing renderers run, layer in v2 enhancements
     if (page === 'overview') {
       try { renderHeadlineInsight(); } catch (e) {}
-      try { renderComplianceTrendChart(); } catch (e) {}
-    }
-    if (page === 'compliance') {
-      try { renderComplianceTrendChart(); } catch (e) {}
     }
     if (page === 'developers') {
       try { renderOnboardingStrip(); } catch (e) {}

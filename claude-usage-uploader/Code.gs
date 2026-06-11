@@ -1067,39 +1067,6 @@ function getDashboardData_uncached_() {
   // 8. Paused developers
   var pausedDevelopers = getPausedDevelopersList();
 
-  // v2: build a 12-week compliance trend summary for the new chart. Walks
-  // the in-memory logData (already loaded above) one extra time scoped to
-  // the trailing 12 ISO weeks. For weeks that overlap the existing 8-week
-  // grid we reuse its tallies; older weeks are derived from raw events.
-  var trendWeeks = getWeekHeaders_(12).slice().reverse(); // oldest → newest
-  var trendSet = {};
-  trendWeeks.forEach(function(w) { trendSet[w] = { successByName: {}, failureByName: {} }; });
-  if (logSheet) {
-    // Reuse the logData we already have in scope from the compliance build
-    for (var ti = 0; ti < logData.length; ti++) {
-      var trow = logData[ti];
-      if (!trow[0]) continue;
-      var twk = String(trow[2] || '').trim();
-      if (!trendSet[twk]) continue;
-      var tstatus = String(trow[3] || '').trim().toUpperCase();
-      var tname = String(trow[1] || '').trim();
-      if (!tname) continue;
-      if (tstatus === 'SUCCESS') trendSet[twk].successByName[tname] = true;
-      else if (tstatus === 'FAILURE' || tstatus === 'ERROR') trendSet[twk].failureByName[tname] = true;
-    }
-  }
-  // v3: roster size = registered developers (Expected list removed)
-  var expectedRosterSize = (registeredDevelopers || []).length;
-  var complianceTrend = trendWeeks.map(function(w) {
-    var bucket = trendSet[w];
-    var compliant = Object.keys(bucket.successByName).length;
-    // Don't double-count: a dev who later succeeded that week shouldn't be in failed
-    var failedNames = Object.keys(bucket.failureByName).filter(function(n) { return !bucket.successByName[n]; });
-    var failed = failedNames.length;
-    var missing = Math.max(0, expectedRosterSize - compliant - failed);
-    return { week: w, compliant: compliant, failed: failed, missing: missing };
-  });
-
   return {
     methodologyVersion: 'v2.0',
     schemaVersion: SHEET_SCHEMA_VERSION,
@@ -1115,7 +1082,6 @@ function getDashboardData_uncached_() {
     complianceGrid: complianceGrid,
     recentUploads: recentUploads,
     weekHeaders: weekHeaders,
-    complianceTrend: complianceTrend,
     generatedAt: new Date().toISOString()
   };
 }
@@ -1607,9 +1573,7 @@ function doPost(e) {
       sheet.appendRow([new Date(), name, weekStart, status, message, nextPollAt, version, lastUpdateCheck]);
       bumpLastModified_();
     } else {
-      // Noise events only refresh the lastModified pill — flushing the heavy
-      // dashboardData cache here would force a full rebuild on every heartbeat.
-      try { CacheService.getScriptCache().put('lastModified', String(Date.now()), 3600); } catch (_) {}
+      // Noise events do not update lastModified, avoiding frequent background client-side auto-refreshes.
     }
 
     // Smart Retry: whenever a developer is seen online (heartbeat/ping), check if they

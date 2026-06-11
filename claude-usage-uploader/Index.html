@@ -127,14 +127,7 @@
         <!-- KPI Strip -->
         <div class="kpi-strip" id="overviewKpis"></div>
 
-        <!-- v2: 12-week compliance trend chart -->
-        <div class="card" style="padding:1rem 1.25rem;margin-bottom:1rem;">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
-            <h3 style="margin:0;font-size:0.95rem;color:var(--text,#e2e8f0);">12-Week Compliance Trend</h3>
-            <span style="font-size:0.74rem;color:var(--muted,#94a3b8);">Stacked bars &#183; compliant / failed / missing</span>
-          </div>
-          <div id="complianceTrendChart" style="height:220px;"></div>
-        </div>
+
 
         <!-- Alert Rail -->
         <div class="alert-rail" id="alertRail"></div>
@@ -668,7 +661,7 @@
       <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">Online = last HEARTBEAT or last PONG within the last 10 minutes. v1 also included <code>lastSeen</code> (which updates on any status) &#8212; that wrongly marked devs as online right after a successful upload even if their service crashed.</p>
 
       <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">Compliance week</h3>
-      <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">Each week starts on Monday in the script timezone. A developer is compliant for the week when at least one SUCCESS row exists for that week. The 12-week trend chart sums compliant / failed / missing across all expected developers per week.</p>
+      <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">Each week starts on Monday in the script timezone. A developer is compliant for the week when at least one SUCCESS row exists for that week.</p>
 
       <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem;">Daily auto-generate</h3>
       <p style="font-size:0.85rem;color:var(--muted,#94a3b8);line-height:1.6;">When a developer is first seen online on a given calendar day, a FORCE_RUN trigger is queued 10 minutes later so reports get uploaded automatically. Skipped for paused devs, devs that already have a trigger queued, and devs that already uploaded successfully today. Toggle from the Health page.</p>
