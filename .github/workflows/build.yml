@@ -1,0 +1,52 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "codex/v2.0.4-reliability", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Use Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v3
+      with:
+        version: 11.9.0
+        
+    - name: Install dependencies
+      working-directory: ./claude-usage-uploader
+      run: pnpm install --frozen-lockfile --ignore-scripts
+      
+    - name: Run Tests
+      working-directory: ./claude-usage-uploader
+      run: |
+        pnpm test
+        node --check claude-usage-uploader.js
+        node -e "new Function(require('fs').readFileSync('Code.gs','utf8')); console.log('Code.gs syntax OK')"
+        
+    - name: Build Binaries
+      working-directory: ./claude-usage-uploader
+      run: |
+        pnpm prepare-tools
+        mkdir -p dist/2.0.4
+        pnpm run build-win
+        pnpm run build-mac-x64
+        pnpm run build-mac-arm64
+        pnpm run build-linux
+        cp repair-v2.0.4.ps1 Repair-Claude-Uploader.cmd dist/2.0.4/
+        sha256sum dist/2.0.4/* | tee dist/2.0.4/SHA256SUMS.txt
+        
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: claude-usage-uploader-dist
+        path: claude-usage-uploader/dist/2.0.4/
