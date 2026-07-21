@@ -6,6 +6,7 @@ const {
   uploadPeriodKey,
   isUploadDue,
   releaseBinaryName,
+  manifestPlatformKeys,
 } = require('../claude-usage-uploader.js');
 
 const base = { timeZone: 'Asia/Kolkata', time: '13:00' };
@@ -46,4 +47,10 @@ test('due calculation compares explicit period keys without invalid Date parsing
 test('release names are versioned so Windows never overwrites a running executable', () => {
   assert.match(releaseBinaryName('2.0.4'), /^ClaudeUsageUploader_v2\.0\.4-/);
   assert.doesNotMatch(releaseBinaryName('2.0.4'), /^ClaudeUsageUploader\.exe$/);
+});
+
+test('manifest lookup distinguishes macOS architectures and retains legacy fallback', () => {
+  assert.deepEqual(manifestPlatformKeys('darwin', 'arm64'), ['darwin-arm64', 'darwin']);
+  assert.deepEqual(manifestPlatformKeys('darwin', 'x64'), ['darwin-x64', 'darwin']);
+  assert.deepEqual(manifestPlatformKeys('win32', 'x64'), ['win32-x64', 'win32']);
 });

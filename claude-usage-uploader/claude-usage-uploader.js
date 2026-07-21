@@ -519,6 +519,13 @@ function releaseBinaryName(version) {
   return `ClaudeUsageUploader_v${safeVersion}-linux-x64`;
 }
 
+function manifestPlatformKeys(platform = process.platform, arch = process.arch) {
+  if (platform === 'win32') return [`win32-${arch}`, 'win32'];
+  if (platform === 'darwin') return [`darwin-${arch}`, 'darwin'];
+  if (platform === 'linux') return [`linux-${arch}`, 'linux'];
+  return [`${platform}-${arch}`, platform];
+}
+
 function launchSilentWindowsUpdater(tempBinPath, newVersion) {
   const updaterPath = path.join(os.tmpdir(), `claude-uploader-update-${process.pid}.vbs`);
   // Install beside the running executable. Replacing an in-use .exe is the
@@ -618,9 +625,12 @@ async function checkForUpdates(name) {
     log(`Update found: ${manifest.latestVersion}. Downloading...`);
 
     // Support both legacy flat manifest and new multi-platform manifest
-    const platformInfo = manifest.platforms ? manifest.platforms[PLATFORM_KEY] : manifest;
+    const platformKeys = manifestPlatformKeys();
+    const platformInfo = manifest.platforms
+      ? platformKeys.map(key => manifest.platforms[key]).find(Boolean)
+      : manifest;
     if (!platformInfo || !platformInfo.downloadUrl) {
-      log(`No update available for platform: ${PLATFORM_KEY}`);
+      log(`No update available for platform: ${platformKeys[0]}`);
       return false;
     }
 
@@ -880,15 +890,11 @@ function runSetupGui() {
               res.end(JSON.stringify({ error: 'Missing name fields' }));
               return;
             }
-            // Try to register the task and report result back to browser
-            let taskOk = false;
-            let taskError = '';
-            try {
-              setupTask();
-              taskOk = true;
-            } catch (e) {
-              taskError = e.message;
-            }
+            // Task registration happens after saveConfig() in main(). Starting
+            // it here races a scheduled copy against the first-run process while
+            // config.json does not exist yet, which can open a second setup UI.
+            const taskOk = true;
+            const taskError = '';
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ taskOk, taskError }));
             if (taskOk) {
@@ -2004,6 +2010,7 @@ async function main() {
       const combinedName = `${setupResult.firstName}_${setupResult.lastName}`;
       saveConfig(combinedName);
       await sendPing(sanitize(combinedName), 'REGISTERED', 'Initial setup completed');
+      setupTask();
       console.log('Setup complete! The uploader is now running in the background.');
     } catch (e) {
       log(`SETUP ERROR: ${e.message}`);
@@ -2081,5 +2088,6 @@ if (require.main === module) {
     isUploadDue,
     zonedDateParts,
     releaseBinaryName,
+    manifestPlatformKeys,
   };
 }
