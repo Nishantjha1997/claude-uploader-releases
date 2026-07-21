@@ -1,17 +1,22 @@
 {
   "dependencies": {
-    "googleapis": "^171.4.0",
-    "node-fetch": "^2.7.0",
-    "pkg": "^5.8.1",
-    "xlsx": "^0.18.5"
+    "node-fetch": "2.7.0"
   },
   "scripts": {
-    "build-win": "pkg claude-usage-uploader.js --target node16-win-x64 --output ClaudeUsageUploader.exe",
-    "build-mac-x64": "pkg claude-usage-uploader.js --target node16-macos-x64 --output ClaudeUsageUploader-mac-x64",
-    "build-mac-arm64": "pkg claude-usage-uploader.js --target node16-macos-arm64 --no-bytecode --public --public-packages \"*\" --output ClaudeUsageUploader-mac-arm64",
-    "build-linux": "pkg claude-usage-uploader.js --target node16-linux-x64 --output ClaudeUsageUploader-linux-x64"
+    "test": "node --test test/*.test.js",
+    "prepare-tools": "node scripts/prepare-vendor-tools.js",
+    "build-win": "pkg claude-usage-uploader.js --target node22-win-x64 --output dist/2.0.4/ClaudeUsageUploader_v2.0.4-win-x64.exe",
+    "build-mac-x64": "pkg claude-usage-uploader.js --target node22-macos-x64 --output dist/2.0.4/ClaudeUsageUploader_v2.0.4-macos-x64",
+    "build-mac-arm64": "pkg claude-usage-uploader.js --target node22-macos-arm64 --no-bytecode --public --public-packages \"*\" --output dist/2.0.4/ClaudeUsageUploader_v2.0.4-macos-arm64",
+    "build-linux": "pkg claude-usage-uploader.js --target node22-linux-x64 --output dist/2.0.4/ClaudeUsageUploader_v2.0.4-linux-x64"
   },
   "devDependencies": {
-    "@google/clasp": "^3.3.0"
-  }
+    "@google/clasp": "3.3.0",
+    "@yao-pkg/pkg": "6.21.0",
+    "tar": "7.5.20"
+  },
+  "pkg": {
+    "assets": ["vendor/**/*"]
+  },
+  "packageManager": "pnpm@11.9.0"
 }

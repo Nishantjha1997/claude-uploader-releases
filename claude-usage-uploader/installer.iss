@@ -5,9 +5,9 @@
 ;   service-account-key.json
 
 #define AppName      "Claude Usage Uploader"
-#define AppVersion   "1.1.0"
+#define AppVersion   "2.0.4"
 #define AppPublisher "Sigma Solve"
-#define AppExeName   "ClaudeUsageUploader.exe"
+#define AppExeName   "ClaudeUsageUploader_v2.0.4-win-x64.exe"
 #define AppKeyFile   "service-account-key.json"
 
 [Setup]
@@ -15,13 +15,13 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppId={{B7E2F1A3-4C8D-4E5F-9A2B-3D6E7F8A9B0C}
-DefaultDirName={autopf}\{#AppName}
+DefaultDirName={localappdata}\SigmaSolve\ClaudeUsageUploader
 DefaultGroupName={#AppName}
 OutputDir=dist
 OutputBaseFilename=ClaudeUsageUploaderSetup-v{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 SetupLogging=yes
 WizardStyle=modern
 DisableProgramGroupPage=yes
@@ -35,9 +35,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 english.WelcomeLabel2=This will install [name/ver] on your computer.%n%nThis tool silently collects Claude AI usage metrics and uploads them to Google Drive every Monday.%n%nClick Next to continue.
 
 [Files]
-; Both files must exist next to installer.iss when running iscc
+; The service key remains an external IT-managed file and is copied by the
+; setup code. It is never embedded into the distributable installer.
 Source: "{#AppExeName}";  DestDir: "{app}"; Flags: ignoreversion
-Source: "{#AppKeyFile}";  DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}";           Filename: "{app}\{#AppExeName}"
@@ -55,6 +55,10 @@ Filename: "schtasks.exe"; \
   Parameters: "/delete /tn ""ClaudeUsageUploader"" /f"; \
   Flags: runhidden; \
   RunOnceId: "RemoveScheduledTask"
+Filename: "schtasks.exe"; \
+  Parameters: "/delete /tn ""ClaudeUsageUploaderHealth"" /f"; \
+  Flags: runhidden; \
+  RunOnceId: "RemoveHealthScheduledTask"
 
 [Code]
 // -----------------------------------------------------------------------
@@ -76,6 +80,19 @@ begin
       mbError, MB_OK
     );
     Result := False;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  SourceKey, DestinationKey: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    SourceKey := ExpandConstant('{src}\{#AppKeyFile}');
+    DestinationKey := ExpandConstant('{app}\{#AppKeyFile}');
+    if not FileCopy(SourceKey, DestinationKey, False) then
+      RaiseException('Could not copy the service credential into the install directory.');
   end;
 end;
 

@@ -482,14 +482,14 @@
       <div class="page-view" id="page-health">
         <div class="kpi-strip" id="healthKpis"></div>
 
-        <!-- Upload Frequency -->
+        <!-- Upload Schedule -->
         <div class="card">
           <div class="card-hd">
             <div class="card-hd-left">
               <div class="card-icon ci-indigo">&#128337;</div>
               <div>
-                <div class="card-title">Upload Frequency</div>
-                <div class="card-subtitle">How often developers are expected to upload usage data</div>
+                <div class="card-title">Upload Schedule</div>
+                <div class="card-subtitle">Frequency and scheduled time applied to every active uploader</div>
               </div>
             </div>
           </div>
@@ -499,7 +499,13 @@
               <option value="weekly">Weekly</option>
               <option value="monthly">Monthly</option>
             </select>
-            <button class="btn btn-primary btn-sm" onclick="saveUploadFrequency()" id="saveFreqBtn">Save</button>
+            <select id="uploadDaySelect" title="Weekly upload day">
+              <option>Sunday</option><option>Monday</option><option selected>Tuesday</option><option>Wednesday</option>
+              <option>Thursday</option><option>Friday</option><option>Saturday</option>
+            </select>
+            <input id="uploadMonthDay" type="number" min="1" max="31" value="1" title="Monthly upload day" style="max-width:110px;">
+            <input id="uploadTimeInput" type="time" value="13:00" title="Upload time">
+            <button class="btn btn-primary btn-sm" onclick="saveUploadSchedule()" id="saveFreqBtn">Save schedule</button>
             <span id="saveFreqResult" style="font-size:13px;color:var(--t3)"></span>
           </div>
         </div>

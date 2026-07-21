@@ -1,0 +1,44 @@
+image: node:22-bookworm
+
+stages:
+  - test
+  - build
+
+variables:
+  PNPM_STORE_DIR: ".pnpm-store"
+
+cache:
+  key: "pnpm-${CI_COMMIT_REF_SLUG}"
+  paths:
+    - .pnpm-store/
+
+before_script:
+  - corepack enable
+  - corepack prepare pnpm@11.9.0 --activate
+  - cd claude-usage-uploader
+  - pnpm config set store-dir ../.pnpm-store
+  - pnpm install --frozen-lockfile --ignore-scripts
+
+test-v2.0.4:
+  stage: test
+  script:
+    - pnpm test
+    - node --check claude-usage-uploader.js
+    - node -e "new Function(require('fs').readFileSync('Code.gs','utf8')); console.log('Code.gs syntax OK')"
+
+build-v2.0.4:
+  stage: build
+  needs: ["test-v2.0.4"]
+  script:
+    - pnpm prepare-tools
+    - mkdir -p dist/2.0.4
+    - pnpm run build-win
+    - pnpm run build-mac-x64
+    - pnpm run build-mac-arm64
+    - pnpm run build-linux
+    - sha256sum dist/2.0.4/* | tee dist/2.0.4/SHA256SUMS.txt
+  artifacts:
+    name: "claude-usage-uploader-2.0.4-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 30 days
+    paths:
+      - claude-usage-uploader/dist/2.0.4/

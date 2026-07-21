@@ -1595,23 +1595,39 @@ function renderHealthKpis() {
     <div class="kpi-card"><div class="kpi-val ${stalledCls}">${stalled}</div><div class="kpi-label">Stalled</div></div>
     <div class="kpi-card"><div class="kpi-val sv-cyan">${triggerQueue.length}</div><div class="kpi-label">Pending Ops</div></div>
   `;
-  // Populate frequency selector from server data
+  // Populate the complete schedule from server data.
   const freqSel = document.getElementById('uploadFreqSelect');
-  if (freqSel && dashboardData.uploadFrequency) freqSel.value = dashboardData.uploadFrequency;
+  const schedule = dashboardData.uploadSchedule || { frequency: dashboardData.uploadFrequency || 'weekly', time: '13:00', day: 'Tuesday', monthDay: 1 };
+  if (freqSel) freqSel.value = schedule.frequency;
+  const daySel = document.getElementById('uploadDaySelect');
+  if (daySel) daySel.value = schedule.day || 'Tuesday';
+  const monthDay = document.getElementById('uploadMonthDay');
+  if (monthDay) monthDay.value = schedule.monthDay || 1;
+  const timeInput = document.getElementById('uploadTimeInput');
+  if (timeInput) timeInput.value = schedule.time || '13:00';
 }
 
-function saveUploadFrequency() {
+function saveUploadSchedule() {
   const sel = document.getElementById('uploadFreqSelect');
+  const daySel = document.getElementById('uploadDaySelect');
+  const monthDay = document.getElementById('uploadMonthDay');
+  const timeInput = document.getElementById('uploadTimeInput');
   const btn = document.getElementById('saveFreqBtn');
   const res = document.getElementById('saveFreqResult');
   const freq = sel.value;
+  const schedule = {
+    frequency: freq,
+    day: daySel.value,
+    monthDay: Number(monthDay.value || 1),
+    time: timeInput.value || '13:00'
+  };
   btn.disabled = true; btn.textContent = 'Saving...'; res.textContent = '';
   google.script.run
     .withSuccessHandler(function(r) {
-      btn.disabled = false; btn.textContent = 'Save';
+      btn.disabled = false; btn.textContent = 'Save schedule';
       if (r.success) {
         res.textContent = '';
-        showToast('Upload frequency set to ' + freq);
+        showToast('Upload schedule saved: ' + freq + ' at ' + schedule.time);
         fetchData();
       } else {
         res.textContent = r.error || 'Error';
@@ -1619,11 +1635,14 @@ function saveUploadFrequency() {
       }
     })
     .withFailureHandler(function(err) {
-      btn.disabled = false; btn.textContent = 'Save';
+      btn.disabled = false; btn.textContent = 'Save schedule';
       showToast('Failed: ' + err.message, true);
     })
-    .setUploadFrequency(freq);
+    .setUploadSchedule(schedule);
 }
+
+// Backward-compatible alias for cached dashboard HTML from earlier deployments.
+function saveUploadFrequency() { saveUploadSchedule(); }
 
 function renderDevRoster() {
   const { registeredDevelopers=[], activeUsers=[] } = dashboardData;

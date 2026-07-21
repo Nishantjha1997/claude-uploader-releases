@@ -38,14 +38,19 @@ const IS_LINUX = process.platform === 'linux';
 const PLATFORM_KEY = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
 
 // -------------------- CONFIGURATION --------------------
-const VERSION = '2.0.3';
+const VERSION = '2.0.4';
 const FORCE_RUN = process.argv.includes('--force');
+const IS_SCHEDULED = process.argv.includes('--scheduled');
+const UPDATED_FROM = (() => {
+  const arg = process.argv.find(a => a.startsWith('--updated-from='));
+  return arg ? arg.substring('--updated-from='.length).replace(/[^0-9A-Za-z._-]/g, '') : '';
+})();
 
 // -------------------- SERVICE LOOP INTERVALS --------------------
 const POLL_INTERVAL_MS      = 60  * 1000;         // poll for admin triggers every 60s (v2.1: was 5s — cuts GAS doGet executions ~91.6%)
 const HEARTBEAT_INTERVAL_MS =  5  * 60 * 1000;    // heartbeat every 5 minutes
 const UPLOAD_CHECK_MS       = 60  * 60 * 1000;    // check if upload due every hour
-const UPDATE_CHECK_MS       = 24  * 60 * 60 * 1000; // check for updates every 24h
+const UPDATE_CHECK_MS       = 60  * 60 * 1000;     // retry update discovery every hour
 
 const MANIFEST_URL = 'https://gist.githubusercontent.com/Nishantjha1997/ad763c62484a3ea70e7507bf671df0bb/raw/version.json';
 
@@ -55,6 +60,7 @@ const WEBHOOK_HMAC_SECRET = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
 
 const DRIVE_FOLDER_ID = '0AMXBcPT9R10cUk9PVA';
 let globalCcusageJsPath = '';
+let globalCcusageBinPath = '';
 const SERVICE_KEY_FILE = 'service-account-key.json';
 const WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycby9bFBRwYLu1GF6urQn3saAuVacI95NjS2Jt2G3eiba3StKwu9i8POjXnlx224NMMXt/exec';
 
@@ -72,6 +78,7 @@ const LOG_FILE = path.join(os.tmpdir(), 'claude-uploader.log');
 const RETRY_QUEUE_FILE   = path.join(CONFIG_DIR, 'upload-queue.json');
 const FAILED_PINGS_FILE  = path.join(CONFIG_DIR, 'failed-pings.ndjson');
 const EVENTS_LOG_FILE    = path.join(CONFIG_DIR, 'events.ndjson');
+const HEALTH_FILE        = path.join(CONFIG_DIR, 'service.heartbeat');
 const PING_TIMEOUT_MS    = 10000;
 const PING_MAX_ATTEMPTS  = 3;
 const EVENTS_ROTATE_BYTES      = 5 * 1024 * 1024;   // 5 MB
@@ -329,7 +336,8 @@ function runCcusage(cmd, outFile, envOpts) {
     const child = spawn(bin, args, {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: (bin === 'node' || bin.includes('node.exe')) ? false : true,
+      shell: false,
+      windowsHide: true,
     });
 
     const timer = setTimeout(() => {
@@ -463,16 +471,83 @@ async function sendPing(name, status, message = '', extra = {}) {
 // -------------------- AUTO-UPDATE --------------------
 function fetchJSON(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      if (res.statusCode !== 200) return reject(new Error('Status: ' + res.statusCode));
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch (e) { reject(e); }
-      });
-    }).on('error', reject);
+    const doRequest = (targetUrl, redirectsLeft) => {
+      if (redirectsLeft < 0) return reject(new Error('Too many manifest redirects'));
+
+      const requestUrl = new URL(targetUrl);
+      // The unversioned Gist raw URL is served through a CDN. A unique query
+      // prevents a recently published manifest from being hidden by a stale edge.
+      requestUrl.searchParams.set('_updateCheck', Date.now().toString());
+
+      https.get(requestUrl, {
+        headers: {
+          'Cache-Control': 'no-cache, no-store',
+          'Pragma': 'no-cache',
+          'User-Agent': `ClaudeUsageUploader/${VERSION}`,
+        },
+      }, (res) => {
+        if ([301, 302, 307, 308].includes(res.statusCode)) {
+          res.resume();
+          if (!res.headers.location) return reject(new Error('Manifest redirect has no Location header'));
+          return doRequest(new URL(res.headers.location, requestUrl).toString(), redirectsLeft - 1);
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error('Manifest status: ' + res.statusCode));
+        }
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(e); }
+        });
+      }).on('error', reject);
+    };
+
+    doRequest(url, 5);
   });
+}
+
+function vbsString(value) {
+  return String(value).replace(/"/g, '""');
+}
+
+function releaseBinaryName(version) {
+  const safeVersion = String(version).replace(/[^0-9A-Za-z._-]/g, '');
+  if (IS_WIN) return `ClaudeUsageUploader_v${safeVersion}-win-x64.exe`;
+  if (IS_MAC) return `ClaudeUsageUploader_v${safeVersion}-${process.arch === 'arm64' ? 'macos-arm64' : 'macos-x64'}`;
+  return `ClaudeUsageUploader_v${safeVersion}-linux-x64`;
+}
+
+function launchSilentWindowsUpdater(tempBinPath, newVersion) {
+  const updaterPath = path.join(os.tmpdir(), `claude-uploader-update-${process.pid}.vbs`);
+  // Install beside the running executable. Replacing an in-use .exe is the
+  // root cause of the v2.0.1 -> v2.0.3 update loop seen in production.
+  const targetBinPath = path.join(EXE_DIR, releaseBinaryName(newVersion));
+  const moveCommand = `cmd.exe /d /s /c "move /Y ""${tempBinPath}"" ""${targetBinPath}"" >nul 2>&1"`;
+  const launchCommand = `"${targetBinPath}" --updated-from=${VERSION}`;
+  const script = [
+    'Option Explicit',
+    'Dim shell, fso, exitCode',
+    'Set shell = CreateObject("WScript.Shell")',
+    'Set fso = CreateObject("Scripting.FileSystemObject")',
+    'WScript.Sleep 5000',
+    `exitCode = shell.Run("${vbsString(moveCommand)}", 0, True)`,
+    'If exitCode = 0 Then',
+    `  shell.Run "${vbsString(launchCommand)}", 0, False`,
+    '  On Error Resume Next',
+    '  fso.DeleteFile WScript.ScriptFullName, True',
+    'End If',
+    '',
+  ].join('\r\n');
+
+  fs.writeFileSync(updaterPath, script, 'utf8');
+  const child = spawn('wscript.exe', ['//B', '//Nologo', updaterPath], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
 }
 
 function compareVersions(v1, v2) {
@@ -558,39 +633,28 @@ async function checkForUpdates(name) {
 
     await downloadFile(platformInfo.downloadUrl, tempBinPath, platformInfo.checksum);
 
-    const currentBinPath = process.execPath;
-
     if (IS_WIN) {
-      const batchScriptPath = path.join(os.tmpdir(), 'updater.bat');
-      const batContent = `@echo off\nping 127.0.0.1 -n 6 > nul\nmove /Y "${tempBinPath}" "${currentBinPath}"\ndel "%~f0"`;
-      fs.writeFileSync(batchScriptPath, batContent);
-
-      await sendPing(name, 'UPDATED', `Updated from ${VERSION} to ${manifest.latestVersion}`);
-
-      const child = spawn('cmd.exe', ['/c', batchScriptPath], {
-        detached: true, stdio: 'ignore', windowsHide: true
-      });
-      child.unref();
+      launchSilentWindowsUpdater(tempBinPath, manifest.latestVersion);
     } else {
       const shScriptPath = path.join(os.tmpdir(), 'updater.sh');
+      const targetBinPath = path.join(EXE_DIR, releaseBinaryName(manifest.latestVersion));
       const shContent = [
         '#!/bin/sh',
         'sleep 5',
-        `mv -f "${tempBinPath}" "${currentBinPath}"`,
-        `chmod +x "${currentBinPath}"`,
+        `mv -f "${tempBinPath}" "${targetBinPath}"`,
+        `chmod +x "${targetBinPath}"`,
+        `"${targetBinPath}" "--updated-from=${VERSION}" >/dev/null 2>&1 &`,
         'rm -- "$0"',
         '',
       ].join('\n');
       fs.writeFileSync(shScriptPath, shContent);
       fs.chmodSync(shScriptPath, '755');
 
-      await sendPing(name, 'UPDATED', `Updated from ${VERSION} to ${manifest.latestVersion}`);
-
       const child = spawn('sh', [shScriptPath], { detached: true, stdio: 'ignore' });
       child.unref();
     }
 
-    log('Update downloaded. Launching updater and exiting.');
+    log('Update downloaded and verified. Launching side-by-side updater and exiting.');
     return true;
   } catch (e) {
     log(`Update check failed: ${e.message}`);
@@ -631,7 +695,13 @@ function checkForAdminTrigger(name) {
             const result = JSON.parse(data);
             const extra = {
               paused: result.paused || false,
-              uploadFrequency: result.uploadFrequency || 'weekly'
+              uploadFrequency: result.uploadFrequency || 'weekly',
+              uploadSchedule: result.uploadSchedule || {
+                frequency: result.uploadFrequency || 'weekly',
+                time: '13:00',
+                day: 'Tuesday',
+                timeZone: 'Asia/Kolkata'
+              }
             };
             if (result.triggered === true) {
               const type = result.type || 'FORCE_RUN';
@@ -870,32 +940,61 @@ function xmlEsc(s) {
 
 function setupTaskWindows() {
   const task = 'ClaudeUsageUploader';
+  const healthTask = 'ClaudeUsageUploaderHealth';
   try {
     execSync(`schtasks /delete /tn "${task}" /f`, { stdio: 'ignore' });
     log('Removed existing scheduled task');
   } catch {}
+  try { execSync(`schtasks /delete /tn "${healthTask}" /f`, { stdio: 'ignore' }); } catch {}
 
   const exePath = process.execPath;
   const launcherBatPath = path.join(EXE_DIR, 'launcher.bat');
   const launcherVbsPath = path.join(EXE_DIR, 'launcher.vbs');
 
-  // launcher.bat — restart loop: if the exe exits for any reason, restart after 60s.
-  // Called by launcher.vbs (which runs it hidden), so no need for `start /min` here.
+  // Neutralize legacy restart loops. Old asynchronous launcher.bat processes
+  // reread this file on their next iteration and then terminate.
   fs.writeFileSync(
     launcherBatPath,
-    `@echo off\r\n:loop\r\n"${exePath}"\r\ntimeout /t 60 /nobreak >nul 2>&1\r\ngoto loop\r\n`
+    '@echo off\r\nexit /b 0\r\n'
   );
-  log(`Launcher bat created: ${launcherBatPath}`);
+  log(`Legacy launcher loop neutralized: ${launcherBatPath}`);
 
-  // launcher.vbs — runs the bat with WindowStyle=0 (hidden). This is the only way to make
-  // a pkg-built console exe run with no visible window. wscript.exe interprets the VBS,
-  // and any process spawned with style 0 inherits a hidden console.
+  // The VBS waits for the worker and returns its exit code to Task Scheduler.
+  // This gives Task Scheduler a real failure signal without a permanent batch loop.
   const vbsContent =
+    `Option Explicit\r\n` +
+    `Dim WshShell, exitCode\r\n` +
     `Set WshShell = CreateObject("WScript.Shell")\r\n` +
-    `WshShell.Run """${launcherBatPath}""", 0, False\r\n` +
-    `Set WshShell = Nothing\r\n`;
+    `exitCode = WshShell.Run("""${exePath}"" --scheduled", 0, True)\r\n` +
+    `WScript.Quit exitCode\r\n`;
   fs.writeFileSync(launcherVbsPath, vbsContent);
   log(`Launcher vbs created: ${launcherVbsPath}`);
+
+  const healthVbsPath = path.join(EXE_DIR, 'healthcheck.vbs');
+  const healthContent = [
+    'Option Explicit',
+    'Dim shell, fso, ageSeconds, pid, lockFile, heartbeatFile, taskName',
+    'Set shell = CreateObject("WScript.Shell")',
+    'Set fso = CreateObject("Scripting.FileSystemObject")',
+    `lockFile = "${vbsString(path.join(CONFIG_DIR, 'service.lock'))}"`,
+    `heartbeatFile = "${vbsString(HEALTH_FILE)}"`,
+    `taskName = "${task}"`,
+    'If Not fso.FileExists(heartbeatFile) Then',
+    '  shell.Run "schtasks.exe /run /tn """ & taskName & """", 0, True',
+    '  WScript.Quit 0',
+    'End If',
+    'ageSeconds = DateDiff("s", fso.GetFile(heartbeatFile).DateLastModified, Now)',
+    'If ageSeconds > 1200 Then',
+    '  If fso.FileExists(lockFile) Then',
+    '    pid = Trim(fso.OpenTextFile(lockFile, 1).ReadAll)',
+    '    If IsNumeric(pid) Then shell.Run "taskkill.exe /PID " & pid & " /F", 0, True',
+    '  End If',
+    '  WScript.Sleep 3000',
+    '  shell.Run "schtasks.exe /run /tn """ & taskName & """", 0, True',
+    'End If',
+    '',
+  ].join('\r\n');
+  fs.writeFileSync(healthVbsPath, healthContent, 'utf8');
 
   // Task XML: ExecutionTimeLimit=PT0S (run indefinitely), Hidden=true, calls wscript.exe
   // on the VBS — which launches the bat hidden — which launches the exe hidden — which
@@ -910,13 +1009,9 @@ function setupTaskWindows() {
       <Enabled>true</Enabled>
       <Delay>PT2M</Delay>
     </LogonTrigger>
-    <BootTrigger>
-      <Enabled>true</Enabled>
-      <Delay>PT2M</Delay>
-    </BootTrigger>
     <TimeTrigger>
       <Repetition>
-        <Interval>PT15M</Interval>
+        <Interval>PT5M</Interval>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
       <StartBoundary>2020-01-01T00:00:00</StartBoundary>
@@ -959,9 +1054,26 @@ function setupTaskWindows() {
   fs.writeFileSync(xmlPath, Buffer.from('\ufeff' + taskXml, 'utf16le'));
   try {
     run(`schtasks /create /tn "${task}" /xml "${xmlPath}" /f`);
-    log('Windows scheduled task created (hidden VBS launcher, persistent)');
+    log('Windows scheduled task created (single hidden supervised worker)');
   } finally {
     try { fs.unlinkSync(xmlPath); } catch {}
+  }
+
+  const healthXml = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Claude Usage Uploader external health monitor</Description></RegistrationInfo>
+  <Triggers><TimeTrigger><Repetition><Interval>PT10M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>
+  <Actions Context="Author"><Exec><Command>wscript.exe</Command><Arguments>"${xmlEsc(healthVbsPath)}"</Arguments></Exec></Actions>
+</Task>`;
+  const healthXmlPath = path.join(os.tmpdir(), 'claude-health-task.xml');
+  fs.writeFileSync(healthXmlPath, Buffer.from('\ufeff' + healthXml, 'utf16le'));
+  try {
+    run(`schtasks /create /tn "${healthTask}" /xml "${healthXmlPath}" /f`);
+    log('Windows external health monitor created');
+  } finally {
+    try { fs.unlinkSync(healthXmlPath); } catch {}
   }
 
   // Start the task immediately so the developer doesn't have to reboot/log out
@@ -1047,32 +1159,84 @@ function isoWeekKey(date) {
 
 function currentWeekKey() { return isoWeekKey(new Date()); }
 
-function isUploadDue(cfg, frequency) {
-  frequency = frequency || 'weekly';
-  const stored = cfg.lastUploadWeek || cfg.lastUploadDate;
-  if (!stored) return true;
+const WEEKDAY_INDEX = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
 
-  if (frequency === 'daily') {
-    const now = new Date();
-    const todayMidnight = new Date(now);
-    todayMidnight.setHours(0, 0, 0, 0);
-    return new Date(stored) < todayMidnight;
-  }
-  if (frequency === 'monthly') {
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    return new Date(stored) < monthStart;
-  }
-  // Weekly: normalise legacy YYYY-MM-DD to ISO week key before comparing
-  const storedKey = /^\d{4}-\d{2}-\d{2}$/.test(stored)
-    ? isoWeekKey(new Date(stored))
-    : stored;
-  return storedKey !== currentWeekKey();
+function zonedDateParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timeZone || 'Asia/Kolkata',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    weekday: 'long'
+  }).formatToParts(date).reduce((out, part) => {
+    if (part.type !== 'literal') out[part.type] = part.value;
+    return out;
+  }, {});
+  return {
+    year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
+    hour: Number(parts.hour), minute: Number(parts.minute), weekday: parts.weekday
+  };
 }
 
-function saveUploadDate(cfg) {
-  const weekKey = currentWeekKey();
-  const updated = { ...cfg, lastUploadWeek: weekKey, lastUploadDate: weekKey };
+function uploadPeriodKey(now, schedule) {
+  schedule = schedule || {};
+  const frequency = schedule.frequency || 'weekly';
+  const p = zonedDateParts(now, schedule.timeZone);
+  const match = /^(\d{1,2}):(\d{2})$/.exec(schedule.time || '13:00');
+  const targetMinutes = match ? Number(match[1]) * 60 + Number(match[2]) : 13 * 60;
+  const beforeTime = p.hour * 60 + p.minute < targetMinutes;
+  const localAnchor = new Date(Date.UTC(p.year, p.month - 1, p.day, 12));
+
+  if (frequency === 'daily') {
+    if (beforeTime) localAnchor.setUTCDate(localAnchor.getUTCDate() - 1);
+    return `daily:${localAnchor.toISOString().slice(0, 10)}`;
+  }
+
+  if (frequency === 'monthly') {
+    const requestedDay = Math.max(1, Math.min(31, Number(schedule.monthDay) || 1));
+    const lastDay = new Date(Date.UTC(p.year, p.month, 0)).getUTCDate();
+    const targetDay = Math.min(requestedDay, lastDay);
+    if (p.day < targetDay || (p.day === targetDay && beforeTime)) {
+      localAnchor.setUTCMonth(localAnchor.getUTCMonth() - 1, 1);
+    }
+    return `monthly:${localAnchor.getUTCFullYear()}-${String(localAnchor.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  const targetWeekday = WEEKDAY_INDEX[schedule.day] ?? WEEKDAY_INDEX.Tuesday;
+  const currentWeekday = WEEKDAY_INDEX[p.weekday];
+  let daysSinceTarget = (currentWeekday - targetWeekday + 7) % 7;
+  if (daysSinceTarget === 0 && beforeTime) daysSinceTarget = 7;
+  localAnchor.setUTCDate(localAnchor.getUTCDate() - daysSinceTarget);
+  return `weekly:${localAnchor.toISOString().slice(0, 10)}`;
+}
+
+function isUploadDue(cfg, schedule, now = new Date()) {
+  const currentKey = uploadPeriodKey(now, schedule);
+  if (cfg.lastUploadPeriodKey) return cfg.lastUploadPeriodKey !== currentKey;
+
+  // Legacy weekly keys can be migrated without causing a duplicate upload.
+  const frequency = (schedule && schedule.frequency) || 'weekly';
+  const stored = cfg.lastSuccessfulUploadAt || cfg.lastUploadDate || cfg.lastUploadWeek;
+  if (!stored) return true;
+  if (frequency === 'weekly' && /^\d{4}-W\d{2}$/.test(stored)) {
+    return stored !== currentWeekKey();
+  }
+  const parsed = new Date(stored);
+  if (Number.isNaN(parsed.getTime())) return true;
+  return uploadPeriodKey(parsed, schedule) !== currentKey;
+}
+
+function saveUploadDate(cfg, schedule) {
+  const now = new Date();
+  const periodKey = uploadPeriodKey(now, schedule);
+  const updated = {
+    ...cfg,
+    lastSuccessfulUploadAt: now.toISOString(),
+    lastUploadPeriodKey: periodKey,
+    lastUploadFrequency: (schedule && schedule.frequency) || 'weekly',
+    // Retain legacy fields for rollback compatibility only.
+    lastUploadWeek: currentWeekKey(),
+    lastUploadDate: now.toISOString()
+  };
   // Atomic write — safe if the process is killed mid-write
   const tmp = CONFIG_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(updated));
@@ -1124,6 +1288,47 @@ function getRetryDelay(retryCount) {
 
 // -------------------- CCUSAGE --------------------
 function ensureCCUsage() {
+  const vendorPlatform = IS_WIN
+    ? 'win32-x64'
+    : IS_MAC
+      ? (process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64')
+      : 'linux-x64';
+  const vendorFile = IS_WIN ? 'ccusage.exe' : 'ccusage';
+  const packagedVendor = path.join(__dirname, 'vendor', vendorPlatform, vendorFile);
+  const extractedDir = path.join(CONFIG_DIR, 'tools', `ccusage-${vendorPlatform}`);
+  const extractedVendor = path.join(extractedDir, vendorFile);
+
+  if (!fs.existsSync(extractedVendor) && fs.existsSync(packagedVendor)) {
+    if (!fs.existsSync(extractedDir)) fs.mkdirSync(extractedDir, { recursive: true });
+    fs.copyFileSync(packagedVendor, extractedVendor);
+    if (!IS_WIN) fs.chmodSync(extractedVendor, '755');
+    log(`Extracted bundled ccusage tool: ${extractedVendor}`);
+  }
+  if (fs.existsSync(extractedVendor)) {
+    globalCcusageBinPath = extractedVendor;
+    log(`ccusage OK (self-contained): ${extractedVendor}`);
+    return;
+  }
+
+  const bundledNames = IS_WIN
+    ? ['ccusage.exe', path.join('tools', 'ccusage.exe')]
+    : ['ccusage', path.join('tools', 'ccusage')];
+  for (const name of bundledNames) {
+    const candidate = path.join(EXE_DIR, name);
+    if (fs.existsSync(candidate)) {
+      globalCcusageBinPath = candidate;
+      log(`ccusage OK (bundled native tool): ${candidate}`);
+      return;
+    }
+  }
+
+  if (process.pkg) {
+    throw new Error(`${ERR.CCUSAGE_NOT_FOUND}: packaged ccusage tool is missing or was quarantined by endpoint security`);
+  }
+
+  // Development/backward-compatibility fallback only. Production v2.0.4
+  // packages include the native tool and never install npm packages at runtime.
+  ensureNpm();
   const envOpts = globalNodeDir
     ? { env: { ...process.env, PATH: `${globalNodeDir}${path.delimiter}${process.env.PATH}` } }
     : {};
@@ -1206,7 +1411,10 @@ async function generateReports() {
     ? { env: { ...process.env, PATH: `${globalNodeDir}${path.delimiter}${process.env.PATH}` } }
     : {};
 
-  if (globalCcusageJsPath) {
+  if (globalCcusageBinPath) {
+    await runCcusage(`"${globalCcusageBinPath}" session --json`, sessionFile, envOpts);
+    await runCcusage(`"${globalCcusageBinPath}" daily --json`,   dailyFile,   envOpts);
+  } else if (globalCcusageJsPath) {
     await runCcusage(`${getNodeCmd()} "${globalCcusageJsPath}" session --json`, sessionFile, envOpts);
     await runCcusage(`${getNodeCmd()} "${globalCcusageJsPath}" daily --json`,   dailyFile,   envOpts);
   } else {
@@ -1399,7 +1607,7 @@ function waitForEnter() {
 // -------------------- GENERATE & UPLOAD --------------------
 // Single function that runs the full generate→upload pipeline with granular status pings.
 // source: 'admin' | 'scheduled' | 'force'
-async function runGenerateAndUpload(cfg, source) {
+async function runGenerateAndUpload(cfg, source, uploadSchedule) {
   try {
     // --- Upload guard: re-verify pause state before doing any work ---
     try {
@@ -1417,7 +1625,6 @@ async function runGenerateAndUpload(cfg, source) {
     log(`POLLING_ACK sent (${source})`);
 
     validateSetup();
-    ensureNpm();
     ensureCCUsage();
 
     await sendPing(cfg.name, 'GENERATE_START', `source=${source}`);
@@ -1494,7 +1701,7 @@ async function runGenerateAndUpload(cfg, source) {
     // Drive upload succeeded; commit lastUploadWeek if the SUCCESS ping was acked
     // OR durably queued for replay. Only skip commit when both ping and queue write failed.
     if (successResult.ok || successResult.queued) {
-      saveUploadDate(cfg);
+      saveUploadDate(cfg, uploadSchedule);
       log(`Upload complete (${source}) for week ${weekOf}; ack=${successResult.ok} queued=${successResult.queued}`);
     } else {
       log(`Upload complete (${source}) for week ${weekOf} BUT success-ping lost and queue-write failed; lastUploadWeek NOT committed`);
@@ -1529,15 +1736,32 @@ function acquireSingleInstanceLock() {
       try { fs.unlinkSync(LOCK_FILE); } catch {}
     }
     if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.writeFileSync(LOCK_FILE, String(process.pid));
+    // Atomic create prevents two scheduler/legacy-launcher processes from both
+    // passing an exists() check and becoming active workers.
+    const fd = fs.openSync(LOCK_FILE, 'wx');
+    fs.writeFileSync(fd, String(process.pid));
+    fs.closeSync(fd);
     const releaseLock = () => { try { fs.unlinkSync(LOCK_FILE); } catch {} };
     process.on('exit', releaseLock);
     process.on('SIGINT',  () => { releaseLock(); process.exit(0); });
     process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
     return true;
   } catch (e) {
-    log(`Lock acquisition error: ${e.message} (continuing anyway)`);
-    return true;  // fail-open: better to run than silently exit
+    if (e.code === 'EEXIST') {
+      log('Another instance won the atomic service lock; exiting');
+      return false;
+    }
+    log(`Lock acquisition error: ${e.message} (failing closed to prevent duplicate uploads)`);
+    return false;
+  }
+}
+
+function writeLocalHealth() {
+  try {
+    if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    fs.writeFileSync(HEALTH_FILE, new Date().toISOString(), 'utf8');
+  } catch (e) {
+    log(`Local health write failed: ${e.message}`);
   }
 }
 
@@ -1556,10 +1780,17 @@ async function serviceLoop(cfg) {
 
   let isRunning = false;
   let isPausedState = false;
-  let currentUploadFrequency = 'weekly';
+  let currentUploadSchedule = {
+    frequency: 'weekly', time: '13:00', day: 'Tuesday', timeZone: 'Asia/Kolkata'
+  };
   let lastHeartbeatSentAt = Date.now();
 
   log(`Service loop started v${VERSION} — polling every ${POLL_INTERVAL_MS / 1000}s (pid=${process.pid})`);
+  writeLocalHealth();
+
+  // Independent local liveness signal consumed by the Windows health task.
+  // It detects a blocked event loop even when remote heartbeat delivery fails.
+  setInterval(writeLocalHealth, 60 * 1000);
 
   // Common extra fields for all pings
   const pingExtra = (overrides = {}) => ({
@@ -1575,7 +1806,7 @@ async function serviceLoop(cfg) {
   // Handle --force immediately before entering the loop
   if (FORCE_RUN) {
     isRunning = true;
-    await runGenerateAndUpload(cfg, 'force');
+    await runGenerateAndUpload(cfg, 'force', currentUploadSchedule);
     cfg = loadConfig() || cfg;
     isRunning = false;
   }
@@ -1590,9 +1821,8 @@ async function serviceLoop(cfg) {
       const trigger = await checkForAdminTrigger(cfg.name);
 
       // --- Update upload frequency from server ---
-      if (trigger.uploadFrequency) {
-        currentUploadFrequency = trigger.uploadFrequency;
-      }
+      if (trigger.uploadSchedule) currentUploadSchedule = trigger.uploadSchedule;
+      else if (trigger.uploadFrequency) currentUploadSchedule.frequency = trigger.uploadFrequency;
 
       // --- Handle paused state transitions ---
       const serverPaused = trigger.paused === true;
@@ -1615,7 +1845,7 @@ async function serviceLoop(cfg) {
         await sendPing(cfg.name, 'POLLING_ACK', 'Trigger received — starting pipeline', pingExtra({ nextPollAt }));
         log('POLLING_ACK sent');
         const freshCfg = loadConfig() || cfg;
-        await runGenerateAndUpload(freshCfg, 'admin');
+        await runGenerateAndUpload(freshCfg, 'admin', currentUploadSchedule);
         cfg = loadConfig() || cfg;
       } else if (trigger.type === 'UPDATE') {
         await sendPing(cfg.name, 'UPDATE_START', 'Checking for hot-patch update...', pingExtra({ nextPollAt }));
@@ -1660,9 +1890,9 @@ async function serviceLoop(cfg) {
     isRunning = true;
     try {
       const freshCfg = loadConfig();
-      if (freshCfg && isUploadDue(freshCfg, currentUploadFrequency)) {
-        log(`Scheduled upload due (frequency=${currentUploadFrequency}) — starting`);
-        await runGenerateAndUpload(freshCfg, 'scheduled');
+      if (freshCfg && isUploadDue(freshCfg, currentUploadSchedule)) {
+        log(`Scheduled upload due (frequency=${currentUploadSchedule.frequency}, time=${currentUploadSchedule.time}) — starting`);
+        await runGenerateAndUpload(freshCfg, 'scheduled', currentUploadSchedule);
         cfg = loadConfig() || cfg;
       }
     } catch (e) {
@@ -1726,7 +1956,7 @@ async function serviceLoop(cfg) {
     if (updated) saveRetryQueue(queue);
   }, RETRY_CHECK_MS);
 
-  // --- Update check every 24 hours ---
+  // --- Update check every hour (startup also checks immediately) ---
   setInterval(async () => {
     try {
       lastUpdateCheckAt = new Date().toISOString();
@@ -1770,7 +2000,6 @@ async function main() {
     console.log('First-run setup...');
     try {
       validateSetup();
-      ensureNpm();
       const setupResult = await runSetupGui();
       const combinedName = `${setupResult.firstName}_${setupResult.lastName}`;
       saveConfig(combinedName);
@@ -1789,8 +2018,12 @@ async function main() {
     return;
   }
 
-  // Ensure the background task is correctly registered (idempotent)
-  try { setupTask(); } catch (e) { log(`Task setup warning: ${e.message}`); }
+  // Manual launches repair registration; scheduled workers must not delete and
+  // recreate the task that is currently supervising them. A newly activated
+  // side-by-side binary is manual and therefore repoints the task once.
+  if (!IS_SCHEDULED || UPDATED_FROM) {
+    try { setupTask(); } catch (e) { log(`Task setup warning: ${e.message}`); }
+  }
 
   const cfg = loadConfig();
   if (!cfg || !cfg.name) {
@@ -1801,9 +2034,22 @@ async function main() {
     return;
   }
 
+  // An update is only reported after the new binary has started, repaired the
+  // scheduled task, loaded the existing config, and can communicate with GAS.
+  if (UPDATED_FROM && UPDATED_FROM !== VERSION) {
+    const confirmed = await sendPing(
+      cfg.name,
+      'UPDATED',
+      `Confirmed restart from ${UPDATED_FROM} to ${VERSION}`,
+      { version: VERSION, lastUpdateCheck: new Date().toISOString() }
+    );
+    if (confirmed.ok) log(`Update confirmed by server: ${UPDATED_FROM} -> ${VERSION}`);
+    else log(`Update confirmation queued: ${UPDATED_FROM} -> ${VERSION}`);
+  }
+
   // Check for updates once on startup
   const isUpdating = await checkForUpdates(cfg.name);
-  if (isUpdating) return; // updater script replaces the exe; launcher.bat restarts it
+  if (isUpdating) return; // side-by-side updater starts the verified new binary
 
   // Enter persistent service loop
   await serviceLoop(cfg);
@@ -1823,7 +2069,17 @@ function handleFatalError(type, err) {
   setTimeout(() => process.exit(1), 3000);
 }
 
-process.on('unhandledRejection', (reason) => handleFatalError('UNHANDLED_REJECTION', reason));
-process.on('uncaughtException',  (err)    => handleFatalError('UNCAUGHT_EXCEPTION', err));
-
-main().catch(() => process.exit(1));
+if (require.main === module) {
+  process.on('unhandledRejection', (reason) => handleFatalError('UNHANDLED_REJECTION', reason));
+  process.on('uncaughtException',  (err)    => handleFatalError('UNCAUGHT_EXCEPTION', err));
+  main().catch(() => process.exit(1));
+} else {
+  module.exports = {
+    compareVersions,
+    isoWeekKey,
+    uploadPeriodKey,
+    isUploadDue,
+    zonedDateParts,
+    releaseBinaryName,
+  };
+}

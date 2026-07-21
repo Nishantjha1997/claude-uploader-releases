@@ -21,6 +21,19 @@ function getWebhookSecret_() {
   }
 }
 
+// Accept both the Script Properties override and the compiled fleet secret
+// during rolling upgrades. Previously, setting hmac_secret immediately
+// invalidated every already-installed client and produced fleet-wide stalls.
+function getWebhookSecrets_() {
+  var secrets = [];
+  try {
+    var override = PropertiesService.getScriptProperties().getProperty('hmac_secret');
+    if (override && override.length > 8) secrets.push(override);
+  } catch (e) {}
+  if (secrets.indexOf(WEBHOOK_HMAC_SECRET_DEFAULT) === -1) secrets.push(WEBHOOK_HMAC_SECRET_DEFAULT);
+  return secrets;
+}
+
 function computeHmac256_(secret, message) {
   var raw = Utilities.computeHmacSha256Signature(message, secret);
   return raw.map(function(b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join('');
@@ -64,8 +77,13 @@ function verifyWebhookSignature_(e) {
   if (skew > HMAC_STALE_SECS) return 'stale_ts (' + skew + 's, limit ' + HMAC_STALE_SECS + 's)';
   if (skew < -HMAC_FUTURE_TOL) return 'future_ts (' + (-skew) + 's ahead of server)';
   var body = (e.postData && e.postData.contents) ? e.postData.contents : '';
-  var expected = computeHmac256_(getWebhookSecret_(), ts + '.' + body);
-  if (!safeEqual_(sig, expected)) return 'sig_mismatch';
+  var secrets = getWebhookSecrets_();
+  var matched = false;
+  for (var i = 0; i < secrets.length; i++) {
+    var expected = computeHmac256_(secrets[i], ts + '.' + body);
+    if (safeEqual_(sig, expected)) matched = true;
+  }
+  if (!matched) return 'sig_mismatch';
   if (nonceSeen_(sig)) return 'replay_blocked';
   return '';
 }
@@ -170,7 +188,7 @@ function doGet(e) {
 
 // Runs sheet setup + trigger install only once per script version, not on every page load.
 // Keyed by a version string — bump the value to force a re-run after major schema changes.
-var INIT_VERSION = 'v3';
+var INIT_VERSION = 'v4';
 function maybeRunOneTimeInit_() {
   var props = PropertiesService.getScriptProperties();
   if (props.getProperty('initDone') === INIT_VERSION) return; // already done
@@ -262,16 +280,15 @@ var REQUIRED_SHEETS = [
 
 function cleanupSheets_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var all = ss.getSheets();
+  var obsoleteNames = ['HeartbeatLog', 'ExpectedDevelopers'];
   var removed = 0;
-  all.forEach(function(s) {
-    if (REQUIRED_SHEETS.indexOf(s.getName()) === -1) {
-      if (ss.getSheets().length > 1) {
-        try { ss.deleteSheet(s); removed++; } catch(e) {}
-      }
+  obsoleteNames.forEach(function(name) {
+    var s = ss.getSheetByName(name);
+    if (s && ss.getSheets().length > 1) {
+      try { ss.deleteSheet(s); removed++; } catch(e) {}
     }
   });
-  if (removed > 0) { log_('Cleanup: removed ' + removed + ' unused sheet(s)'); invalidateCache_(); }
+  if (removed > 0) { log_('Cleanup: removed ' + removed + ' known obsolete sheet(s)'); invalidateCache_(); }
 }
 
 // v3: the roster doubles as the live-activity database. Noise pings
@@ -281,6 +298,51 @@ function cleanupSheets_() {
 //          6=LastUpload 7=Version 8=NextPollAt 9=LastUpdateCheck
 var REG_SHEET_HEADERS = ['Name', 'RegisteredAt', 'LastSeen', 'LastHeartbeat', 'LastPong', 'LastUpload', 'Version', 'NextPollAt', 'LastUpdateCheck'];
 
+function looksLikeIsoDate_(value) {
+  if (!value) return false;
+  if (value && typeof value.getTime === 'function') return !isNaN(value.getTime());
+  var text = String(value).trim();
+  return /^\d{4}-\d{2}-\d{2}T/.test(text) && !isNaN(new Date(text).getTime());
+}
+
+function looksLikeVersion_(value) {
+  return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(String(value || '').trim());
+}
+
+function repairRegisteredDevelopersSchema_(sheet) {
+  var data = sheet.getDataRange().getValues();
+  if (!data.length) data = [REG_SHEET_HEADERS];
+  var headers = data[0].map(function(h) { return String(h || '').trim(); });
+  var exact = headers.length >= REG_SHEET_HEADERS.length;
+  for (var h = 0; h < REG_SHEET_HEADERS.length && exact; h++) exact = headers[h] === REG_SHEET_HEADERS[h];
+  if (exact) return false;
+
+  var repaired = [REG_SHEET_HEADERS.slice()];
+  for (var r = 1; r < data.length; r++) {
+    var row = data[r];
+    var name = String(row[0] || '').trim();
+    if (!name) continue;
+    // The broken v3 migration wrote activity into positions C:I while leaving
+    // the old Name/FirstSeenAt/Version/Status headers in A:D. Preserve only
+    // values that are valid for their intended semantic type.
+    var registeredAt = looksLikeIsoDate_(row[1]) ? row[1] : new Date().toISOString();
+    var lastSeen = looksLikeIsoDate_(row[2]) ? row[2] : '';
+    var lastHeartbeat = looksLikeIsoDate_(row[3]) ? row[3] : '';
+    var lastPong = looksLikeIsoDate_(row[4]) ? row[4] : '';
+    var lastUpload = looksLikeIsoDate_(row[5]) ? row[5] : '';
+    var version = looksLikeVersion_(row[6]) ? String(row[6]).trim() : (looksLikeVersion_(row[2]) ? String(row[2]).trim() : '');
+    var nextPollAt = looksLikeIsoDate_(row[7]) ? row[7] : '';
+    var lastUpdateCheck = looksLikeIsoDate_(row[8]) ? row[8] : '';
+    repaired.push([name, registeredAt, lastSeen, lastHeartbeat, lastPong, lastUpload, version, nextPollAt, lastUpdateCheck]);
+  }
+
+  sheet.clearContents();
+  sheet.getRange(1, 1, repaired.length, REG_SHEET_HEADERS.length).setValues(repaired);
+  sheet.getRange(1, 1, 1, REG_SHEET_HEADERS.length).setFontWeight('bold');
+  log_('v4 migration: repaired RegisteredDevelopers header/value mapping for ' + (repaired.length - 1) + ' row(s)');
+  return true;
+}
+
 function ensureRegisteredDevelopersSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName('RegisteredDevelopers');
@@ -289,6 +351,7 @@ function ensureRegisteredDevelopersSheet() {
     sheet.appendRow(REG_SHEET_HEADERS);
     sheet.getRange(1, 1, 1, REG_SHEET_HEADERS.length).setFontWeight('bold');
   } else {
+    if (repairRegisteredDevelopersSchema_(sheet)) return sheet;
     var lastCol = sheet.getLastColumn();
     if (lastCol < REG_SHEET_HEADERS.length) {
       // Upgrade pre-v3 sheets (Name, RegisteredAt only) in place
@@ -475,6 +538,7 @@ function checkAndClearTrigger(name) {
   // 99% of calls (idle developers) take this branch with ZERO spreadsheet reads.
   var pausedSet       = getPausedSetCached_();
   var uploadFrequency = getSettingCached_('uploadFrequency', 'weekly');
+  var uploadSchedule  = getUploadScheduleCached_();
   var paused          = !!pausedSet[name.trim().toLowerCase()];
 
   // Trigger-queue check — served from a 15-second cache.
@@ -492,7 +556,7 @@ function checkAndClearTrigger(name) {
     }
   }
   if (!candidateFound) {
-    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
+    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency, uploadSchedule: uploadSchedule };
   }
 
   // --- SAFE PATH (exclusive lock) ---
@@ -500,12 +564,12 @@ function checkAndClearTrigger(name) {
   // mutating so concurrent requests cannot double-consume the same trigger entry.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var qSheet = ss.getSheetByName('TriggerQueue');
-  if (!qSheet) return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
+  if (!qSheet) return { triggered: false, paused: paused, uploadFrequency: uploadFrequency, uploadSchedule: uploadSchedule };
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
     log_('checkAndClearTrigger: lock timeout for ' + name);
-    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
+    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency, uploadSchedule: uploadSchedule };
   }
   try {
     var data = qSheet.getDataRange().getValues();
@@ -519,11 +583,11 @@ function checkAndClearTrigger(name) {
         SpreadsheetApp.flush();  // commit immediately so concurrent readers see it gone
         log_('TriggerQueue: consumed ' + triggerType + ' for ' + name);
         invalidateCache_();
-        return { triggered: true, type: triggerType, paused: paused, uploadFrequency: uploadFrequency };
+        return { triggered: true, type: triggerType, paused: paused, uploadFrequency: uploadFrequency, uploadSchedule: uploadSchedule };
       }
     }
     // Trigger was claimed by a concurrent request between the cache-check and lock acquisition.
-    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency };
+    return { triggered: false, paused: paused, uploadFrequency: uploadFrequency, uploadSchedule: uploadSchedule };
   } finally {
     lock.releaseLock();
   }
@@ -719,6 +783,7 @@ function invalidateCache_() {
   c.remove('pausedSet');
   c.remove('triggerQueueRows');
   c.remove('setting_uploadFrequency');
+  c.remove('upload_schedule_json');
   c.remove('latest_uploader_version_gist');
   c.put('lastModified', String(Date.now()), 3600);
 }
@@ -1079,6 +1144,7 @@ function getDashboardData_uncached_() {
     currentWeek: getCurrentWeekStart_(),
     pausedDevelopers: pausedDevelopers,
     uploadFrequency: getSetting_('uploadFrequency', 'weekly'),
+    uploadSchedule: getUploadSchedule_(),
     complianceGrid: complianceGrid,
     recentUploads: recentUploads,
     weekHeaders: weekHeaders,
@@ -2436,7 +2502,7 @@ function adminResumeDeveloper(name) {
 // v2: schema version this code expects. Bump when ComplianceLog / HeartbeatLog
 // / TriggerQueue / RegisteredDevelopers columns are added or changed. The
 // `getSchemaInfo` endpoint surfaces this on the Health page.
-var SHEET_SCHEMA_VERSION = 'v3.0';
+var SHEET_SCHEMA_VERSION = 'v4.0';
 
 function ensureSettingsSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2488,6 +2554,81 @@ function getSetting_(key, defaultVal) {
 
 function getUploadFrequency() {
   return getSetting_('uploadFrequency', 'weekly');
+}
+
+function normalizeUploadTime_(raw) {
+  var text = String(raw == null ? '' : raw).trim();
+  if (/^\d{1,2}:\d{2}$/.test(text)) {
+    var bits = text.split(':');
+    var hh = Math.max(0, Math.min(23, parseInt(bits[0], 10)));
+    var mm = Math.max(0, Math.min(59, parseInt(bits[1], 10)));
+    return ('0' + hh).slice(-2) + ':' + ('0' + mm).slice(-2);
+  }
+  var serial = Number(text);
+  if (isFinite(serial) && serial >= 0 && serial < 1) {
+    var total = Math.round(serial * 24 * 60) % (24 * 60);
+    return ('0' + Math.floor(total / 60)).slice(-2) + ':' + ('0' + (total % 60)).slice(-2);
+  }
+  return '13:00';
+}
+
+function getUploadSchedule_() {
+  var frequency = getSetting_('uploadFrequency', 'weekly');
+  if (['daily', 'weekly', 'monthly'].indexOf(frequency) === -1) frequency = 'weekly';
+  var day = getSetting_('globalUploadDay', 'Tuesday');
+  var monthDay = parseInt(getSetting_('globalUploadMonthDay', '1'), 10);
+  if (!isFinite(monthDay) || monthDay < 1 || monthDay > 31) monthDay = 1;
+  return {
+    frequency: frequency,
+    time: normalizeUploadTime_(getSetting_('globalUploadTime', '13:00')),
+    day: day,
+    monthDay: monthDay,
+    timeZone: Session.getScriptTimeZone() || 'Asia/Kolkata'
+  };
+}
+
+function getUploadScheduleCached_() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get('upload_schedule_json');
+  if (cached) {
+    try { return JSON.parse(cached); } catch (e) {}
+  }
+  var schedule = getUploadSchedule_();
+  cache.put('upload_schedule_json', JSON.stringify(schedule), 300);
+  return schedule;
+}
+
+function setSettingValue_(sheet, key, value) {
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === key) {
+      sheet.getRange(i + 1, 2).setValue(value);
+      return;
+    }
+  }
+  sheet.appendRow([key, value]);
+}
+
+function setUploadSchedule(schedule) {
+  requireAdmin_();
+  schedule = schedule || {};
+  var frequency = String(schedule.frequency || '').trim();
+  if (['daily', 'weekly', 'monthly'].indexOf(frequency) === -1) return { success: false, error: 'Invalid frequency' };
+  var time = normalizeUploadTime_(schedule.time);
+  var validDays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  var day = String(schedule.day || 'Tuesday');
+  if (validDays.indexOf(day) === -1) return { success: false, error: 'Invalid weekly day' };
+  var monthDay = parseInt(schedule.monthDay, 10) || 1;
+  if (monthDay < 1 || monthDay > 31) return { success: false, error: 'Monthly day must be 1-31' };
+
+  var sheet = ensureSettingsSheet_();
+  setSettingValue_(sheet, 'uploadFrequency', frequency);
+  setSettingValue_(sheet, 'globalUploadTime', time);
+  setSettingValue_(sheet, 'globalUploadDay', day);
+  setSettingValue_(sheet, 'globalUploadMonthDay', monthDay);
+  invalidateCache_();
+  log_('Settings: upload schedule set to ' + JSON.stringify(getUploadSchedule_()));
+  return { success: true, schedule: getUploadSchedule_() };
 }
 
 function setUploadFrequency(freq) {
