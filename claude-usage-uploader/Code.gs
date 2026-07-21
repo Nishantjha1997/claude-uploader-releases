@@ -12,15 +12,6 @@ var WEBHOOK_HMAC_SECRET_DEFAULT = 'ss-uploader-hmac-2026-b7f3a9c1d4e2';
 var HMAC_STALE_SECS = 300;   // v2: tightened from 7200s (was a 2h replay window)
 var HMAC_FUTURE_TOL = 300;   // Allow up to 5 minutes clock skew tolerance for drifted client machines
 
-function getWebhookSecret_() {
-  try {
-    var override = PropertiesService.getScriptProperties().getProperty('hmac_secret');
-    return (override && override.length > 8) ? override : WEBHOOK_HMAC_SECRET_DEFAULT;
-  } catch (e) {
-    return WEBHOOK_HMAC_SECRET_DEFAULT;
-  }
-}
-
 // Accept both the Script Properties override and the compiled fleet secret
 // during rolling upgrades. Previously, setting hmac_secret immediately
 // invalidated every already-installed client and produced fleet-wide stalls.
@@ -1165,38 +1156,24 @@ function getDashboardData_uncached_() {
 }
 
 // v2: latest binary version source — replaces the hardcoded LATEST_VERSION
-// constant on the client. Reads from Script Properties (admin-editable) and
-// falls back to a sensible default for first-deploy compatibility.
+// constant on the client. Reads from Script Properties (admin-editable via
+// setLatestVersion, called by the release process) and falls back to a
+// sensible default for first-deploy compatibility.
+//
+// v3: dropped the UrlFetchApp(gist) lookup. It required the
+// script.external_request OAuth scope, which is only granted through an
+// interactive consent screen in the Apps Script editor — a headless
+// `clasp push`/redeploy can never grant it, so every dashboard load was
+// silently failing this fetch and serving a stale hardcoded fallback
+// instead. Script Properties is a strictly better source of truth here:
+// the release process already knows the exact version it just shipped and
+// can set it directly, with no external call and no extra scope needed.
 function getLatestVersion() {
-  var cache = CacheService.getScriptCache();
-  var cached = cache.get('latest_uploader_version_gist');
-  if (cached && cached.length > 0) {
-    return cached.trim();
-  }
-
-  // Fallback to script property or code default
-  var fallback = '2.0.2';
+  var fallback = '2.0.4';
   try {
     var v = PropertiesService.getScriptProperties().getProperty('latest_uploader_version');
-    if (v && v.length > 0) fallback = v.trim();
+    if (v && v.length > 0) return v.trim();
   } catch (e) {}
-
-  // Gist URL containing the version manifest
-  var gistUrl = 'https://gist.githubusercontent.com/Nishantjha1997/ad763c62484a3ea70e7507bf671df0bb/raw/version.json';
-  try {
-    var response = UrlFetchApp.fetch(gistUrl, { muteHttpExceptions: true });
-    if (response.getResponseCode() === 200) {
-      var json = JSON.parse(response.getContentText());
-      if (json && json.latestVersion) {
-        var ver = String(json.latestVersion).trim();
-        cache.put('latest_uploader_version_gist', ver, 3600); // Cache for 1 hour
-        return ver;
-      }
-    }
-  } catch (e) {
-    log_('getLatestVersion: Failed to fetch from gist: ' + e.toString());
-  }
-
   return fallback;
 }
 
@@ -1204,9 +1181,6 @@ function setLatestVersion(version) {
   requireAdmin_();
   if (!version) return { success: false, error: 'version required' };
   PropertiesService.getScriptProperties().setProperty('latest_uploader_version', String(version).trim());
-  try {
-    CacheService.getScriptCache().remove('latest_uploader_version_gist');
-  } catch (e) {}
   return { success: true, latestVersion: getLatestVersion() };
 }
 
@@ -1686,7 +1660,7 @@ function simulatePing(name, status, message) {
   requireAdmin_();
   var body = JSON.stringify({ name: name, status: status, message: message });
   var ts   = Math.floor(Date.now() / 1000).toString();
-  var sig  = computeHmac256_(getWebhookSecret_(), ts + '.' + body);
+  var sig  = computeHmac256_(getWebhookSecrets_()[0], ts + '.' + body);
   var e = {
     postData:  { contents: body },
     parameter: { _ts: ts, _sig: sig }
