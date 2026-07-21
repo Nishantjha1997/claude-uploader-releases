@@ -2,16 +2,32 @@
   "latestVersion": "2.0.4",
   "platforms": {
     "win32": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader.exe",
-      "checksum": "fefff4552beb8700b02f3b3caa1601ffa7fc609b5b393eae6a9406bec03db8e7"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-win-x64.exe",
+      "checksum": "PENDING_CI_BUILD"
+    },
+    "win32-x64": {
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-win-x64.exe",
+      "checksum": "PENDING_CI_BUILD"
     },
     "darwin": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader-mac-arm64",
-      "checksum": "e6f3c49390fd5b68de8883c098caee2686445c85c449083a0fb7f47f5d650131"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-macos-arm64",
+      "checksum": "PENDING_CI_BUILD"
+    },
+    "darwin-arm64": {
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-macos-arm64",
+      "checksum": "PENDING_CI_BUILD"
+    },
+    "darwin-x64": {
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-macos-x64",
+      "checksum": "PENDING_CI_BUILD"
     },
     "linux": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader-linux-x64",
-      "checksum": "1ff52833c9e8181362e8b8810b97e83566c79afb480ef90bd38b7ab0c8b79b77"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-linux-x64",
+      "checksum": "PENDING_CI_BUILD"
+    },
+    "linux-x64": {
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-linux-x64",
+      "checksum": "PENDING_CI_BUILD"
     }
   }
 }

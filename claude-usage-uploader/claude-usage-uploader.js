@@ -646,7 +646,7 @@ async function checkForUpdates(name) {
     if (IS_WIN) {
       launchSilentWindowsUpdater(tempBinPath, manifest.latestVersion);
     } else {
-      const shScriptPath = path.join(os.tmpdir(), 'updater.sh');
+      const shScriptPath = path.join(os.tmpdir(), `claude-uploader-update-${process.pid}.sh`);
       const targetBinPath = path.join(EXE_DIR, releaseBinaryName(manifest.latestVersion));
       const shContent = [
         '#!/bin/sh',
@@ -1107,6 +1107,7 @@ function setupTaskMac() {
     <key>ProgramArguments</key>
     <array>
         <string>${process.execPath}</string>
+        <string>--scheduled</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -1130,8 +1131,8 @@ function setupTaskLinux() {
   const bin = process.execPath;
   // Service loop handles all scheduling internally — just need a single @reboot entry.
   // 2-minute delay gives the network time to come up before the first poll.
-  const bootLine = `@reboot sleep 120 && "${bin}" # ClaudeUsageUploader`;
-  const cronLine = `*/15 * * * * pgrep -f "ClaudeUsageUploader" >/dev/null || "${bin}" # ClaudeUsageUploader`;
+  const bootLine = `@reboot sleep 120 && "${bin}" --scheduled # ClaudeUsageUploader`;
+  const cronLine = `*/15 * * * * pgrep -f "ClaudeUsageUploader" >/dev/null || "${bin}" --scheduled # ClaudeUsageUploader`;
 
   let currentCrontab = '';
   try { currentCrontab = run('crontab -l'); } catch {}
@@ -1775,8 +1776,8 @@ function writeLocalHealth() {
 // The tool runs as a persistent background process. It never exits under normal conditions.
 // - Polls GAS every 60s for admin triggers (PING or FORCE_RUN)
 // - Sends a heartbeat every 5 minutes so the dashboard shows online status
-// - Checks once per hour if a scheduled weekly upload is due
-// - Checks once per day for a new version
+// - Checks once per hour (plus per-machine jitter) if a scheduled upload is due
+// - Checks once per hour for a new version
 async function serviceLoop(cfg) {
   if (!acquireSingleInstanceLock()) {
     console.log('Claude Usage Uploader is already running in the background.');
@@ -1891,7 +1892,11 @@ async function serviceLoop(cfg) {
   }, WATCHDOG_INTERVAL_MS);
 
   // --- Scheduled upload check every hour ---
-  setInterval(async () => {
+  // Deterministic per-machine jitter (0-15 min, stable across restarts) staggers the
+  // fleet so all clients don't hit Drive/GAS at the same top-of-hour tick.
+  const uploadJitterMs = (crypto.createHash('sha256').update(String(cfg.name || os.hostname()))
+    .digest().readUInt32BE(0) % (15 * 60)) * 1000;
+  const uploadCheckTick = async () => {
     if (isRunning || isPausedState) return;
     isRunning = true;
     try {
@@ -1906,7 +1911,11 @@ async function serviceLoop(cfg) {
     } finally {
       isRunning = false;
     }
-  }, UPLOAD_CHECK_MS);
+  };
+  setTimeout(() => {
+    uploadCheckTick();
+    setInterval(uploadCheckTick, UPLOAD_CHECK_MS);
+  }, uploadJitterMs);
 
   // --- Retry queue processing every 5 minutes ---
   const RETRY_CHECK_MS = 5 * 60 * 1000;
@@ -1964,6 +1973,8 @@ async function serviceLoop(cfg) {
 
   // --- Update check every hour (startup also checks immediately) ---
   setInterval(async () => {
+    // Never start (or exit for) an update while an upload/retry is in flight.
+    if (isRunning) return;
     try {
       lastUpdateCheckAt = new Date().toISOString();
       const isUpdating = await checkForUpdates(cfg.name);

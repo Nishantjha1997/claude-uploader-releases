@@ -19,6 +19,11 @@ Fleet reliability and self-update recovery release.
   on Node.js or npm being installed or healthy on each user's computer.
 - Keeps failed dashboard notifications in a durable replay queue.
 - Selects the correct macOS update for Intel or Apple Silicon.
+- Staggers scheduled uploads with a deterministic per-machine jitter (0-15 min)
+  so the whole fleet never hits Drive/Apps Script at the same instant.
+- Never begins a self-update while an upload or retry is in flight.
+- macOS/Linux background entries now pass `--scheduled`, so task registration
+  is no longer rewritten on every respawn.
 
 ## Dashboard and Apps Script
 

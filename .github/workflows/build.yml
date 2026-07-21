@@ -3,7 +3,11 @@ name: Build and Release
 on:
   push:
     branches: [ "codex/v2.0.4-reliability", "main" ]
+    tags: [ "v*" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -50,3 +54,20 @@ jobs:
       with:
         name: claude-usage-uploader-dist
         path: claude-usage-uploader/dist/2.0.4/
+
+    # Explicit file list on purpose: release assets must never include
+    # service-account keys or machine-generated launcher scripts.
+    - name: Publish GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        name: Claude Usage Uploader ${{ github.ref_name }}
+        body_path: claude-usage-uploader/RELEASE_NOTES_v2.0.4.md
+        files: |
+          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-win-x64.exe
+          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-macos-x64
+          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-macos-arm64
+          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-linux-x64
+          claude-usage-uploader/dist/2.0.4/repair-v2.0.4.ps1
+          claude-usage-uploader/dist/2.0.4/Repair-Claude-Uploader.cmd
+          claude-usage-uploader/dist/2.0.4/SHA256SUMS.txt
