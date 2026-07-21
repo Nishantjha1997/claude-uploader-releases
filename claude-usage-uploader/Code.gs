@@ -336,6 +336,18 @@ function repairRegisteredDevelopersSchema_(sheet) {
     repaired.push([name, registeredAt, lastSeen, lastHeartbeat, lastPong, lastUpload, version, nextPollAt, lastUpdateCheck]);
   }
 
+  // Safety snapshot before the destructive rewrite — restorable directly from
+  // the spreadsheet (hidden tab) without digging through Drive version history.
+  try {
+    var ssParent = sheet.getParent();
+    var backupName = 'RegisteredDevelopers_backup_' + Utilities.formatDate(new Date(), 'UTC', 'yyyyMMdd_HHmmss');
+    if (!ssParent.getSheetByName(backupName)) {
+      sheet.copyTo(ssParent).setName(backupName).hideSheet();
+    }
+  } catch (e) {
+    log_('v4 migration: pre-repair snapshot failed (continuing): ' + e);
+  }
+
   sheet.clearContents();
   sheet.getRange(1, 1, repaired.length, REG_SHEET_HEADERS.length).setValues(repaired);
   sheet.getRange(1, 1, 1, REG_SHEET_HEADERS.length).setFontWeight('bold');
