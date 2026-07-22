@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  RELEASE_VERSION: 2.0.5
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -41,19 +44,19 @@ jobs:
       working-directory: ./claude-usage-uploader
       run: |
         pnpm prepare-tools
-        mkdir -p dist/2.0.4
+        mkdir -p dist/${RELEASE_VERSION}
         pnpm run build-win
         pnpm run build-mac-x64
         pnpm run build-mac-arm64
         pnpm run build-linux
-        cp repair-v2.0.4.ps1 Repair-Claude-Uploader.cmd dist/2.0.4/
-        sha256sum dist/2.0.4/* | tee dist/2.0.4/SHA256SUMS.txt
+        cp repair-v2.0.5.ps1 Repair-Claude-Uploader.cmd dist/${RELEASE_VERSION}/
+        sha256sum dist/${RELEASE_VERSION}/* | tee dist/${RELEASE_VERSION}/SHA256SUMS.txt
         
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: claude-usage-uploader-dist
-        path: claude-usage-uploader/dist/2.0.4/
+        path: claude-usage-uploader/dist/${{ env.RELEASE_VERSION }}/
 
   windows-smoke:
     needs: build
@@ -69,7 +72,7 @@ jobs:
     - name: Smoke test Windows executable startup
       shell: pwsh
       run: |
-        $exe = Resolve-Path 'dist-smoke\ClaudeUsageUploader_v2.0.4-win-x64.exe'
+        $exe = Resolve-Path 'dist-smoke\ClaudeUsageUploader_v2.0.5-win-x64.exe'
         $work = Join-Path $env:RUNNER_TEMP 'claude-uploader-smoke'
         New-Item -ItemType Directory -Force -Path $work | Out-Null
         $copy = Join-Path $work 'ClaudeUsageUploader.exe'
@@ -119,7 +122,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: claude-usage-uploader-dist
-        path: claude-usage-uploader/dist/2.0.4/
+        path: claude-usage-uploader/dist/${{ env.RELEASE_VERSION }}/
 
     # Explicit file list on purpose: release assets must never include
     # service-account keys or machine-generated launcher scripts.
@@ -127,13 +130,13 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         name: Claude Usage Uploader ${{ github.ref_name }}
-        body_path: claude-usage-uploader/RELEASE_NOTES_v2.0.4.md
+        body_path: claude-usage-uploader/RELEASE_NOTES_v2.0.5.md
         overwrite_files: true
         files: |
-          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-win-x64.exe
-          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-macos-x64
-          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-macos-arm64
-          claude-usage-uploader/dist/2.0.4/ClaudeUsageUploader_v2.0.4-linux-x64
-          claude-usage-uploader/dist/2.0.4/repair-v2.0.4.ps1
-          claude-usage-uploader/dist/2.0.4/Repair-Claude-Uploader.cmd
-          claude-usage-uploader/dist/2.0.4/SHA256SUMS.txt
+          claude-usage-uploader/dist/2.0.5/ClaudeUsageUploader_v2.0.5-win-x64.exe
+          claude-usage-uploader/dist/2.0.5/ClaudeUsageUploader_v2.0.5-macos-x64
+          claude-usage-uploader/dist/2.0.5/ClaudeUsageUploader_v2.0.5-macos-arm64
+          claude-usage-uploader/dist/2.0.5/ClaudeUsageUploader_v2.0.5-linux-x64
+          claude-usage-uploader/dist/2.0.5/repair-v2.0.5.ps1
+          claude-usage-uploader/dist/2.0.5/Repair-Claude-Uploader.cmd
+          claude-usage-uploader/dist/2.0.5/SHA256SUMS.txt

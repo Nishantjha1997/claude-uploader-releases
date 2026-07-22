@@ -1752,9 +1752,9 @@ document.getElementById('globalSearch').addEventListener('input', function(e) {
 // ==================== VERSION MATRIX PAGE RENDERERS ====================
 // v2: live value is dynamically fetched from the Gist at runtime (client-side)
 // to bypass server cache/fetch issues and prevent hardcoding.
-let LATEST_VERSION_FALLBACK = '2.0.3';
+let LATEST_VERSION_FALLBACK = '2.0.5';
 function fetchLatestVersionFromGist() {
-  fetch('https://gist.githubusercontent.com/Nishantjha1997/ad763c62484a3ea70e7507bf671df0bb/raw/version.json')
+  fetch('https://gist.githubusercontent.com/tpansuriya-ship-it/efa5db7d25aaa85db78d8bdc402f9903/raw/version.json')
     .then(r => r.json())
     .then(json => {
       if (json && json.latestVersion) {

@@ -1169,7 +1169,7 @@ function getDashboardData_uncached_() {
 // the release process already knows the exact version it just shipped and
 // can set it directly, with no external call and no extra scope needed.
 function getLatestVersion() {
-  var fallback = '2.0.4';
+  var fallback = '2.0.5';
   try {
     var v = PropertiesService.getScriptProperties().getProperty('latest_uploader_version');
     if (v && v.length > 0) return v.trim();

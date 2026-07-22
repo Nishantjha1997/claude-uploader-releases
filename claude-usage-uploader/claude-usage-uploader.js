@@ -38,7 +38,7 @@ const IS_LINUX = process.platform === 'linux';
 const PLATFORM_KEY = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
 
 // -------------------- CONFIGURATION --------------------
-const VERSION = '2.0.4';
+const VERSION = '2.0.5';
 const FORCE_RUN = process.argv.includes('--force');
 const IS_SCHEDULED = process.argv.includes('--scheduled');
 const UPDATED_FROM = (() => {
@@ -52,7 +52,7 @@ const HEARTBEAT_INTERVAL_MS =  5  * 60 * 1000;    // heartbeat every 5 minutes
 const UPLOAD_CHECK_MS       = 60  * 60 * 1000;    // check if upload due every hour
 const UPDATE_CHECK_MS       = 60  * 60 * 1000;     // retry update discovery every hour
 
-const MANIFEST_URL = 'https://gist.githubusercontent.com/Nishantjha1997/ad763c62484a3ea70e7507bf671df0bb/raw/version.json';
+const MANIFEST_URL = 'https://gist.githubusercontent.com/tpansuriya-ship-it/efa5db7d25aaa85db78d8bdc402f9903/raw/version.json';
 
 // Shared HMAC secret between uploader and GAS webhook endpoint.
 // GAS validates X-Uploader-Signature on every incoming request.
