@@ -1753,8 +1753,9 @@ document.getElementById('globalSearch').addEventListener('input', function(e) {
 // v2: live value is dynamically fetched from the Gist at runtime (client-side)
 // to bypass server cache/fetch issues and prevent hardcoding.
 let LATEST_VERSION_FALLBACK = '2.0.5';
+const VERSION_MANIFEST_URL = 'https://gist.githubusercontent.com/tpansuriya-ship-it/efa5db7d25aaa85db78d8bdc402f9903/raw/version.json';
 function fetchLatestVersionFromGist() {
-  fetch('https://gist.githubusercontent.com/tpansuriya-ship-it/efa5db7d25aaa85db78d8bdc402f9903/raw/version.json')
+  fetch(VERSION_MANIFEST_URL + '?cachebust=' + Date.now(), { cache: 'no-store' })
     .then(r => r.json())
     .then(json => {
       if (json && json.latestVersion) {
