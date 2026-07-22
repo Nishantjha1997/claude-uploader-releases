@@ -1,33 +1,33 @@
 {
-  "latestVersion": "2.0.4",
+  "latestVersion": "2.0.5",
   "platforms": {
     "win32": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-win-x64.exe",
-      "checksum": "2876693323146ebcba94c955cc77491fce1087f99be29cb75a40c7f5ef2b1375"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.5/ClaudeUsageUploader_v2.0.5-win-x64.exe",
+      "checksum": "133467e0c297d7e5c713c3d419ed0ddb3f7ca0e44194afb02addc5dfb9822f36"
     },
     "win32-x64": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-win-x64.exe",
-      "checksum": "2876693323146ebcba94c955cc77491fce1087f99be29cb75a40c7f5ef2b1375"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.5/ClaudeUsageUploader_v2.0.5-win-x64.exe",
+      "checksum": "133467e0c297d7e5c713c3d419ed0ddb3f7ca0e44194afb02addc5dfb9822f36"
     },
     "darwin": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-macos-arm64",
-      "checksum": "04efe7e3dbce4ff853d4f9ffcd02fecc69b33ab00aa34a249ec3655547856a2a"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.5/ClaudeUsageUploader_v2.0.5-macos-arm64",
+      "checksum": "64d53682ca9537f8a8e23ba114b0be4d153130c3fdb4131564ed7b74879047d6"
     },
     "darwin-arm64": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-macos-arm64",
-      "checksum": "04efe7e3dbce4ff853d4f9ffcd02fecc69b33ab00aa34a249ec3655547856a2a"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.5/ClaudeUsageUploader_v2.0.5-macos-arm64",
+      "checksum": "64d53682ca9537f8a8e23ba114b0be4d153130c3fdb4131564ed7b74879047d6"
     },
     "darwin-x64": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-macos-x64",
-      "checksum": "9ed9f51d3817b526cf0b27b2a53b3780a4a2e3bc86bd36f1d48e582e9447201d"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.5/ClaudeUsageUploader_v2.0.5-macos-x64",
+      "checksum": "3489bfb58b638066de07a8b1936cd0ccb5f8fc5007600a56f111bb50a7d7bf03"
     },
     "linux": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-linux-x64",
-      "checksum": "76ccd5c52e2370fa479dbbabc48de77f77157973ba78423173492a6c737e9587"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.5/ClaudeUsageUploader_v2.0.5-linux-x64",
+      "checksum": "3604561bbacb9ef8b664ed99a0ec4e0491fa6793e03085799a8fc1c0cfba90b3"
     },
     "linux-x64": {
-      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.4/ClaudeUsageUploader_v2.0.4-linux-x64",
-      "checksum": "76ccd5c52e2370fa479dbbabc48de77f77157973ba78423173492a6c737e9587"
+      "downloadUrl": "https://github.com/Nishantjha1997/claude-uploader-releases/releases/download/v2.0.5/ClaudeUsageUploader_v2.0.5-linux-x64",
+      "checksum": "3604561bbacb9ef8b664ed99a0ec4e0491fa6793e03085799a8fc1c0cfba90b3"
     }
   }
 }
